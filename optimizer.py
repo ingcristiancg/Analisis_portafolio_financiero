@@ -16,6 +16,52 @@ import pandas as pd
 from scipy.optimize import minimize
 
 
+def _clean_numeric_series(series: pd.Series) -> pd.Series:
+    """
+    Convierte una serie a numérico manejando formatos contables y de moneda:
+    - Símbolos de divisa: $, €, £, MXN, USD
+    - Separadores de miles (comas o puntos)
+    - Formato contable negativo entre paréntesis: (123.45) -> -123.45
+    - Porcentajes: 15.4% -> 0.154 (o detección si es retorno)
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    
+    s_clean = series.astype(str).str.strip()
+    # Manejo de contabilidad negativa: (100.5) -> -100.5
+    neg_mask = s_clean.str.startswith("(") & s_clean.str.endswith(")")
+    s_clean = s_clean.str.replace("(", "", regex=False).str.replace(")", "", regex=False)
+    
+    # Quitar símbolos monetarios y espacios
+    for char in ["$", "€", "£", "MXN", "USD", " ", "\xa0"]:
+        s_clean = s_clean.str.replace(char, "", regex=False)
+    
+    # Manejar comas y puntos
+    # Si contiene tanto coma como punto (ej. 1,234.56 o 1.234,56)
+    has_comma = s_clean.str.contains(",", regex=False)
+    has_dot = s_clean.str.contains(r"\.", regex=True)
+    both = has_comma & has_dot
+    if both.any():
+        # Asumir formato estándar 1,234.56 eliminando comas
+        s_clean = s_clean.str.replace(",", "", regex=False)
+    else:
+        # Si solo tiene comas y parecen decimales (ej: 12,34)
+        comma_decimal = has_comma & ~has_dot
+        if comma_decimal.any():
+            s_clean = s_clean.str.replace(",", ".", regex=False)
+            
+    # Manejo de porcentajes
+    has_pct = s_clean.str.endswith("%")
+    s_clean = s_clean.str.replace("%", "", regex=False)
+    
+    num_series = pd.to_numeric(s_clean, errors="coerce")
+    if has_pct.any():
+        num_series.loc[has_pct] = num_series.loc[has_pct] / 100.0
+        
+    num_series.loc[neg_mask] = -num_series.loc[neg_mask]
+    return num_series
+
+
 def load_and_preprocess_data(
     file_or_path: Any,
     sheet_name: Optional[Any] = None,
@@ -23,69 +69,180 @@ def load_and_preprocess_data(
     ipc_col_name: str = "IPC",
 ) -> Dict[str, Any]:
     """
-    Carga y preprocesa el archivo Excel/CSV aplicando estrictamente:
-    - Registro de auditoría y normalización de calidad de datos.
-    - Detección de columnas de precios y fechas.
-    - REGLA DEL TIEMPO CRÍTICA: Asegura orden cronológico (pasado -> presente).
-      Si viene ordenado con la fecha más reciente arriba, lo invierte.
-    - Cálculo de rendimientos simples mensuales.
-    - Exclusión del IPC para la optimización de activos.
-    - Eliminación de NaNs y normalización de series temporales.
+    Agente Autónomo Universal de Ingestión y Normalización Cuantitativa:
+    - Escaneo y selección inteligente de hojas en archivos Excel multidimensionales.
+    - Detección adaptativa de filas de encabezado (ignora títulos/banners superiores).
+    - Limpieza profunda de formatos monetarios, contables, comas, puntos y símbolos.
+    - Reconocimiento universal de series temporales con resolución heurística de fechas.
+    - REGLA DEL TIEMPO CRÍTICA: Asegura orden cronológico estricto (pasado -> presente).
+    - Detección automática: Precios Históricos vs. Rendimientos Precalculados.
+    - Tolerancia inteligente de Benchmark: si no existe IPC, procede con degradación serena.
+    - Eliminación de activos singulares o sin varianza.
+    - Auditoría exhaustiva paso a paso para el Comité de Inversión.
     """
     audit_events = []
+    sheet_used = "Default"
     
-    # 1. Lectura del archivo
-    if isinstance(file_or_path, str) and file_or_path.endswith((".csv", ".txt")):
-        raw_df = pd.read_csv(file_or_path)
-        sheet_used = "CSV"
+    # ----------------------------------------------------
+    # 1. INGESTIÓN Y DETECCIÓN INTELIGENTE DE ESTRUCTURA
+    # ----------------------------------------------------
+    raw_df = None
+    if isinstance(file_or_path, str) and file_or_path.lower().endswith((".csv", ".txt")):
+        # Probar distintos separadores comunes (, o ; o \t)
+        for sep in [",", ";", "\t"]:
+            try:
+                temp_df = pd.read_csv(file_or_path, sep=sep, nrows=15)
+                if len(temp_df.columns) > 1:
+                    raw_df = pd.read_csv(file_or_path, sep=sep)
+                    sheet_used = f"CSV (sep='{sep}')"
+                    break
+            except Exception:
+                continue
+        if raw_df is None:
+            raw_df = pd.read_csv(file_or_path)
+            sheet_used = "CSV"
     else:
         xl = pd.ExcelFile(file_or_path)
-        if sheet_name is None:
-            target_sheet = xl.sheet_names[0]
-            for s in ["report", "Precios", "Prices", "Crecimiento"]:
-                if s in xl.sheet_names:
-                    target_sheet = s
+        all_sheets = xl.sheet_names
+        
+        if sheet_name is not None and sheet_name in all_sheets:
+            target_sheet = sheet_name
+        else:
+            # Puntuador inteligente de hojas: buscar palabras clave o la hoja con más datos
+            best_sheet = all_sheets[0]
+            max_score = -1
+            for s in all_sheets:
+                s_lower = str(s).lower()
+                score = 0
+                if any(k in s_lower for k in ["precios", "prices", "rendimientos", "returns", "datos", "data", "report"]):
+                    score += 50
+                # Probar tamaño
+                try:
+                    head_s = xl.parse(s, nrows=10)
+                    score += head_s.shape[1] * 2 + min(head_s.shape[0], 10)
+                except Exception:
+                    pass
+                if score > max_score:
+                    max_score = score
+                    best_sheet = s
+            target_sheet = best_sheet
+            
+        sheet_used = target_sheet
+        raw_df = pd.read_excel(file_or_path, sheet_name=target_sheet)
+
+    # ----------------------------------------------------
+    # 2. DETECCIÓN ADAPTATIVA DEL ENCABEZADO (HEADER OFFSET)
+    # ----------------------------------------------------
+    # Si la fila 0, 1 o 2 tiene títulos ("Reporte", "Portafolio", NaNs)
+    # Comprobar si las columnas actuales contienen "Unnamed:" o si en las primeras filas
+    # hay una fila que parece un encabezado real (contiene nombres de texto y fechas)
+    header_offset = 0
+    df_candidate = raw_df.copy()
+    
+    # Evaluar si la fila de columnas original no parece un encabezado real
+    # o si las primeras filas contienen cadenas como 'fecha', 'date', 'ipc'
+    found_header_idx = None
+    for r_idx in range(min(6, len(df_candidate))):
+        row_str_vals = [str(x).strip().lower() for x in df_candidate.iloc[r_idx].dropna().tolist()]
+        if any(k in v for v in row_str_vals for k in ["fecha", "date", "ipc", "precio", "retorno", "rendimiento"]):
+            found_header_idx = r_idx
+            break
+
+    if found_header_idx is not None:
+        header_offset = found_header_idx + 1
+        df_candidate.columns = [str(x).strip() for x in df_candidate.iloc[found_header_idx]]
+        df_candidate = df_candidate.iloc[found_header_idx + 1:].reset_index(drop=True)
+    else:
+        unnamed_ratio = sum(1 for c in df_candidate.columns if str(c).startswith("Unnamed:")) / max(len(df_candidate.columns), 1)
+        if unnamed_ratio > 0.4 and len(df_candidate) > 2:
+            for r_idx in range(min(5, len(df_candidate))):
+                row_vals = df_candidate.iloc[r_idx].dropna().astype(str).tolist()
+                if len(row_vals) >= 2:
+                    header_offset = r_idx + 1
+                    df_candidate.columns = [str(x).strip() for x in df_candidate.iloc[r_idx]]
+                    df_candidate = df_candidate.iloc[r_idx + 1:].reset_index(drop=True)
                     break
-            sheet_name = target_sheet
-        sheet_used = sheet_name
-        raw_df = pd.read_excel(file_or_path, sheet_name=sheet_name)
-
-    total_raw_rows = len(raw_df)
-    total_raw_cols = len(raw_df.columns)
+                
+    total_raw_rows = len(df_candidate)
+    total_raw_cols = len(df_candidate.columns)
 
     audit_events.append({
-        "Fase del Proceso": "Ingestión de Datos",
-        "Descripción Cuantitativa": f"Lectura de archivo completada. Hoja: '{sheet_used}'. Filas brutas: {total_raw_rows}, Columnas: {total_raw_cols}.",
+        "Fase del Proceso": "Ingestión Universal de Datos",
+        "Descripción Cuantitativa": f"Lectura de datos completada. Hoja: '{sheet_used}' (offset encabezado: {header_offset}). Filas: {total_raw_rows}, Columnas: {total_raw_cols}.",
         "Estado": "Validado",
-        "Tratamiento Aplicado": "Estructura cargada correctamente en memoria"
+        "Tratamiento Aplicado": "Estructura cargada y normalizada en memoria"
     })
 
-    # 2. Identificación de la columna de fecha
-    if date_col_name is None:
-        for c in raw_df.columns:
+    # ----------------------------------------------------
+    # 3. DESCUBRIMIENTO INTELIGENTE DE LA COLUMNA TEMPORAL
+    # ----------------------------------------------------
+    detected_date_col = None
+    if date_col_name and date_col_name in df_candidate.columns:
+        detected_date_col = date_col_name
+    else:
+        # 1. Por coincidencia de nombre
+        for c in df_candidate.columns:
             c_str = str(c).lower().strip()
-            if any(k in c_str for k in ["fecha", "date", "time", "periodo", "mes"]):
-                date_col_name = c
-                break
-        if date_col_name is None:
-            date_col_name = raw_df.columns[0]
+            if any(k in c_str for k in ["fecha", "date", "time", "periodo", "mes", "year", "año", "dia"]):
+                # Verificar si parsea razonablemente
+                parsed_test = pd.to_datetime(df_candidate[c], errors="coerce")
+                if parsed_test.notna().sum() >= max(2, len(df_candidate) * 0.3):
+                    detected_date_col = c
+                    break
 
-    audit_events.append({
-        "Fase del Proceso": "Estructura Temporal",
-        "Descripción Cuantitativa": f"Columna temporal identificada: '{date_col_name}'.",
-        "Estado": "Validado",
-        "Tratamiento Aplicado": "Configurada como índice cronológico del modelo"
-    })
+        # 2. Por contenido: solo considerar si la columna NO es puramente numérica continua (precios)
+        if detected_date_col is None:
+            for c in df_candidate.columns:
+                # Si ya es datetime
+                if pd.api.types.is_datetime64_any_dtype(df_candidate[c]):
+                    detected_date_col = c
+                    break
+                # Si es string o contiene fechas legibles (años >= 1990 o strings con delimitadores / o -)
+                c_series = df_candidate[c].dropna()
+                if not pd.api.types.is_numeric_dtype(c_series):
+                    parsed_test = pd.to_datetime(c_series, errors="coerce")
+                    if parsed_test.notna().sum() > len(df_candidate) * 0.5:
+                        # Verificar que los años sean creíbles (ej. entre 1980 y 2100)
+                        years = parsed_test.dt.year.dropna()
+                        if (years >= 1980).all() and (years <= 2100).all():
+                            detected_date_col = c
+                            break
 
-    # 3. Limpieza de filas no numéricas o pies de página
-    df_clean = raw_df.copy()
-    df_clean["__parsed_date__"] = pd.to_datetime(df_clean[date_col_name], errors="coerce")
+    has_synthetic_dates = False
+    if detected_date_col is None:
+        # Fallback inteligente: crear secuencia mensual sintética (compatible con pandas 2.0 y 2.2+)
+        detected_date_col = "Fecha_Generada"
+        try:
+            date_idx = pd.date_range(end=pd.Timestamp.today(), periods=len(df_candidate), freq="ME")
+        except Exception:
+            date_idx = pd.date_range(end=pd.Timestamp.today(), periods=len(df_candidate), freq="M")
+        df_candidate[detected_date_col] = date_idx
+        has_synthetic_dates = True
+        audit_events.append({
+            "Fase del Proceso": "Estructura Temporal Autónoma",
+            "Descripción Cuantitativa": f"No se encontró columna explícita de fecha. Se generó índice temporal mensual autónomo ({len(df_candidate)} periodos).",
+            "Estado": "Autónomo",
+            "Tratamiento Aplicado": "Generación sintética de secuencia mensual para habilitar análisis Markowitz"
+        })
+    else:
+        audit_events.append({
+            "Fase del Proceso": "Estructura Temporal",
+            "Descripción Cuantitativa": f"Columna temporal identificada: '{detected_date_col}'.",
+            "Estado": "Validado",
+            "Tratamiento Aplicado": "Configurada como eje cronológico del modelo"
+        })
+
+    # ----------------------------------------------------
+    # 4. LIMPIEZA DE FILAS NO TEMPORALES Y PIES DE PÁGINA
+    # ----------------------------------------------------
+    df_clean = df_candidate.copy()
+    df_clean["__parsed_date__"] = pd.to_datetime(df_clean[detected_date_col], errors="coerce")
     
     invalid_date_mask = df_clean["__parsed_date__"].isna()
-    invalid_rows_count = invalid_date_mask.sum()
+    invalid_rows_count = int(invalid_date_mask.sum())
     
     if invalid_rows_count > 0:
-        dropped_samples = df_clean.loc[invalid_date_mask, date_col_name].dropna().unique().tolist()[:5]
+        dropped_samples = df_clean.loc[invalid_date_mask, detected_date_col].dropna().unique().tolist()[:5]
         audit_events.append({
             "Fase del Proceso": "Filtrado de Resúmenes Residuales",
             "Descripción Cuantitativa": f"Se depuraron {invalid_rows_count} filas con fórmulas de resumen o textos de pie de página: {dropped_samples}.",
@@ -95,9 +252,11 @@ def load_and_preprocess_data(
         df_clean = df_clean[~invalid_date_mask].copy()
 
     if len(df_clean) < 2:
-        raise ValueError("El archivo no contiene suficientes observaciones temporales válidas para calcular rendimientos mensuales.")
+        raise ValueError("El archivo no contiene suficientes observaciones temporales válidas (mínimo 2 periodos).")
 
-    # 4. REGLA DEL TIEMPO CRÍTICA:
+    # ----------------------------------------------------
+    # 5. REGLA DEL TIEMPO CRÍTICA (PASADO -> PRESENTE)
+    # ----------------------------------------------------
     first_date = df_clean["__parsed_date__"].iloc[0]
     last_date = df_clean["__parsed_date__"].iloc[-1]
     was_inverted = False
@@ -109,7 +268,7 @@ def load_and_preprocess_data(
             "Fase del Proceso": "Orden Cronológico",
             "Descripción Cuantitativa": f"El archivo presentaba orden descendente ({first_date.strftime('%Y-%m-%d')} a {last_date.strftime('%Y-%m-%d')}).",
             "Estado": "Normalizado",
-            "Tratamiento Aplicado": "Reordenado a estricto orden cronológico (pasado en fila 0 -> presente en última fila)"
+            "Tratamiento Aplicado": "Invertido a orden cronológico estricto (pasado en fila 0 -> presente en última fila)"
         })
     else:
         df_clean = df_clean.sort_values(by="__parsed_date__", ascending=True).reset_index(drop=True)
@@ -120,8 +279,10 @@ def load_and_preprocess_data(
             "Tratamiento Aplicado": "Orden cronológico confirmado"
         })
 
-    # 5. Identificación y filtrado de columnas
-    all_cols = [c for c in df_clean.columns if c not in [date_col_name, "__parsed_date__"]]
+    # ----------------------------------------------------
+    # 6. LIMPIEZA NUMÉRICA PROFUNDA Y FILTRADO DE ACTIVOS
+    # ----------------------------------------------------
+    all_cols = [c for c in df_clean.columns if c not in [detected_date_col, "__parsed_date__"]]
     valid_numeric_cols = []
     discarded_cols = []
 
@@ -130,70 +291,124 @@ def load_and_preprocess_data(
         if c_str.startswith("Unnamed:") or "proporci" in c_str.lower() or "portafolio" in c_str.lower():
             discarded_cols.append(c)
             continue
-        s = pd.to_numeric(df_clean[c], errors="coerce")
-        if s.notna().sum() > len(df_clean) * 0.5:
-            df_clean[c] = s
-            valid_numeric_cols.append(c)
+            
+        cleaned_series = _clean_numeric_series(df_clean[c])
+        # Al menos el 40% de datos válidos numéricos
+        if cleaned_series.notna().sum() >= max(2, len(df_clean) * 0.4):
+            # Comprobar que no sea una columna constante sin varianza
+            valid_vals = cleaned_series.dropna()
+            if valid_vals.nunique() > 1:
+                df_clean[c] = cleaned_series
+                valid_numeric_cols.append(c)
+            else:
+                discarded_cols.append(f"{c} (sin varianza)")
         else:
             discarded_cols.append(c)
 
     if len(discarded_cols) > 0:
         audit_events.append({
-            "Fase del Proceso": "Columnas Auxiliares",
-            "Descripción Cuantitativa": f"Se depuraron {len(discarded_cols)} columnas de fórmulas intermedias del archivo original.",
+            "Fase del Proceso": "Depuración de Columnas",
+            "Descripción Cuantitativa": f"Se excluyeron {len(discarded_cols)} columnas no aptas (fórmulas intermedias, vacías o sin varianza).",
             "Estado": "Normalizado",
-            "Tratamiento Aplicado": "Filtradas para conservar únicamente columnas de precios de activos"
+            "Tratamiento Aplicado": "Filtradas para conservar únicamente series financieras cuantitativas"
         })
 
-    # Separar IPC de las acciones a optimizar
+    # ----------------------------------------------------
+    # 7. IDENTIFICACIÓN INTELIGENTE DEL BENCHMARK (TOLERANCIA)
+    # ----------------------------------------------------
     actual_ipc_col = None
+    # Prioridad: coincidencia exacta con ipc_col_name
     for c in valid_numeric_cols:
         if ipc_col_name.lower() in str(c).lower().strip():
             actual_ipc_col = c
             break
+            
+    # Si no, buscar palabras clave comunes de benchmark
+    if actual_ipc_col is None:
+        for c in valid_numeric_cols:
+            c_low = str(c).lower().strip()
+            if any(k in c_low for k in ["benchmark", "indice", "índice", "mxx", "sp500", "s&p", "spy", "^mxx"]):
+                actual_ipc_col = c
+                break
 
     if actual_ipc_col:
         audit_events.append({
-            "Fase del Proceso": "Benchmark de Mercado (IPC)",
-            "Descripción Cuantitativa": f"Columna '{actual_ipc_col}' identificada como índice de mercado.",
+            "Fase del Proceso": "Benchmark de Mercado",
+            "Descripción Cuantitativa": f"Columna '{actual_ipc_col}' identificada como índice de referencia de mercado.",
             "Estado": "Conforme a Norma",
-            "Tratamiento Aplicado": "Excluido 100% de la optimización de activos; reservado para métricas de riesgo relativo"
+            "Tratamiento Aplicado": "Excluida 100% de la optimización; reservada para métricas CAPM de riesgo relativo"
+        })
+    else:
+        audit_events.append({
+            "Fase del Proceso": "Benchmark de Mercado",
+            "Descripción Cuantitativa": "No se detectó un índice explícito de mercado (IPC/Benchmark).",
+            "Estado": "Informativo",
+            "Tratamiento Aplicado": "La optimización procederá de forma autónoma con todos los activos disponibles"
         })
 
     stock_cols = [c for c in valid_numeric_cols if c != actual_ipc_col]
     if len(stock_cols) < 2:
-        raise ValueError("Se requieren al menos 2 acciones numéricas válidas para optimizar la cartera.")
+        raise ValueError(
+            f"Se requieren al menos 2 activos financieros con datos cuantitativos válidos. Columnas encontradas: {valid_numeric_cols}"
+        )
 
     audit_events.append({
-        "Fase del Proceso": "Universo de Activos",
+        "Fase del Proceso": "Universo de Activos Elegibles",
         "Descripción Cuantitativa": f"{len(stock_cols)} activos validados para el portafolio: {', '.join(stock_cols)}.",
         "Estado": "Validado",
-        "Tratamiento Aplicado": "Activos listos para el cálculo de rendimientos y covarianza"
+        "Tratamiento Aplicado": "Activos listos para el cálculo de rendimientos y matriz de covarianza"
     })
 
-    # 6. Cálculo de rendimientos simples mensuales: R_t = (P_t - P_{t-1}) / P_{t-1}
-    prices_df = df_clean[[date_col_name, "__parsed_date__"] + valid_numeric_cols].copy()
-    returns_df = df_clean[valid_numeric_cols].pct_change().dropna(how="all")
-    returns_df.index = df_clean["__parsed_date__"].iloc[1:]
-    
-    null_counts = returns_df[stock_cols].isna().sum()
-    total_nulls = null_counts.sum()
-    if total_nulls > 0:
-        audit_events.append({
-            "Fase del Proceso": "Consistencia de Datos",
-            "Descripción Cuantitativa": f"Se depuraron {total_nulls} celdas no disponibles en la serie.",
-            "Estado": "Normalizado",
-            "Tratamiento Aplicado": "Alineadas para garantizar matrices de covarianza completas"
-        })
-    
-    returns_df = returns_df.dropna(subset=stock_cols)
-    dates_series = pd.Series(returns_df.index, index=returns_df.index, name="Fecha")
+    # ----------------------------------------------------
+    # 8. DETECCIÓN AUTOMÁTICA: PRECIOS vs RENDIMIENTOS
+    # ----------------------------------------------------
+    # Si los valores ya son rendimientos porcentuales (promedios cercanos a 0, valores entre -1 y 1)
+    is_already_returns = False
+    sample_stock = df_clean[stock_cols].dropna()
+    if len(sample_stock) > 2:
+        means = sample_stock.mean()
+        maxs = sample_stock.max()
+        mins = sample_stock.min()
+        if (means.abs() < 0.35).all() and (maxs < 2.5).all() and (mins > -0.99).all():
+            is_already_returns = True
 
+    if is_already_returns:
+        audit_events.append({
+            "Fase del Proceso": "Detección de Estructura Financiera",
+            "Descripción Cuantitativa": "El archivo contiene rendimientos periódicos ya calculados (valores centrados en torno a 0).",
+            "Estado": "Autónomo",
+            "Tratamiento Aplicado": "Se omite cálculo de variación porcentual para preservar los rendimientos directos"
+        })
+        prices_df = df_clean[[detected_date_col, "__parsed_date__"] + valid_numeric_cols].copy()
+        returns_df = df_clean[valid_numeric_cols].copy()
+        returns_df.index = df_clean["__parsed_date__"]
+    else:
+        # Precios brutos: Calcular rendimientos simples mensuales R_t = (P_t - P_{t-1}) / P_{t-1}
+        prices_df = df_clean[[detected_date_col, "__parsed_date__"] + valid_numeric_cols].copy()
+        returns_df = df_clean[valid_numeric_cols].pct_change().dropna(how="all")
+        returns_df.index = df_clean["__parsed_date__"].iloc[1:]
+
+    # ----------------------------------------------------
+    # 9. CONSOLIDACIÓN Y ALINEACIÓN DE MATRICES
+    # ----------------------------------------------------
+    # Imputar o recortar NaNs en la serie de rendimientos
+    # Primero intentar dropna para asegurar covarianza positiva definida
+    valid_returns_df = returns_df.dropna(subset=stock_cols)
+    if len(valid_returns_df) < 2:
+        # Si dropna descarta demasiado, interpolar suavemente o ffill
+        returns_df = returns_df.ffill().bfill().dropna(subset=stock_cols)
+    else:
+        returns_df = valid_returns_df
+
+    if len(returns_df) < 2:
+        raise ValueError("Insuficientes periodos tras la alineación temporal de rendimientos (mínimo 2 periodos completos).")
+
+    dates_series = pd.Series(returns_df.index, index=returns_df.index, name="Fecha")
     stock_returns = returns_df[stock_cols]
     ipc_returns = returns_df[actual_ipc_col] if actual_ipc_col is not None else None
 
     audit_df = pd.DataFrame(audit_events)
-    cleaned_export_df = df_clean[[date_col_name] + valid_numeric_cols].copy()
+    cleaned_export_df = df_clean[[detected_date_col] + valid_numeric_cols].copy()
 
     return {
         "raw_prices": prices_df,
@@ -203,7 +418,7 @@ def load_and_preprocess_data(
         "ipc_returns": ipc_returns,
         "stock_cols": stock_cols,
         "ipc_col": actual_ipc_col,
-        "date_col": date_col_name,
+        "date_col": detected_date_col,
         "dates": dates_series,
         "was_inverted": was_inverted,
         "num_periods": len(stock_returns),
@@ -264,8 +479,8 @@ def optimize_markowitz_max_return(
     - Restricción 2: 100% del capital invertido (sum(w) = 1).
     - Límites: Solo posiciones largas (w_i >= 0, sin ventas en corto).
     """
-    mean_returns = stock_returns.mean().values
-    cov_matrix = stock_returns.cov().values
+    mean_returns = np.array(stock_returns.mean().values, dtype=float, copy=True)
+    cov_matrix = np.array(stock_returns.cov().values, dtype=float, copy=True)
     n = len(mean_returns)
     stock_names = stock_returns.columns.tolist()
 
@@ -338,8 +553,8 @@ def optimize_minimum_variance(stock_returns: pd.DataFrame) -> Dict[str, Any]:
     Cartera de Varianza Mínima Global (Long-Only, sum(w)=1):
     Punto de anclaje inferior de la frontera eficiente.
     """
-    mean_returns = stock_returns.mean().values
-    cov_matrix = stock_returns.cov().values
+    mean_returns = np.array(stock_returns.mean().values, dtype=float, copy=True)
+    cov_matrix = np.array(stock_returns.cov().values, dtype=float, copy=True)
     n = len(mean_returns)
 
     def portfolio_volatility(w: np.ndarray) -> float:
@@ -384,8 +599,8 @@ def run_monte_carlo_simulation(
     - Calcula rendimiento mensual, riesgo mensual (sigma_p) y Sharpe mensual (Rf=0).
     """
     np.random.seed(seed)
-    mean_returns = stock_returns.mean().values
-    cov_matrix = stock_returns.cov().values
+    mean_returns = np.array(stock_returns.mean().values, dtype=float, copy=True)
+    cov_matrix = np.array(stock_returns.cov().values, dtype=float, copy=True)
     n = len(mean_returns)
 
     returns_sim = np.zeros(num_portfolios)

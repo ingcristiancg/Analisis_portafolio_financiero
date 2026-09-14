@@ -144,17 +144,23 @@ class QuantitativePortfolioAgent:
         }
 
     def _analyze_correlations(self, corr: pd.DataFrame) -> Dict[str, Any]:
-        corr_vals = corr.copy()
-        np.fill_diagonal(corr_vals.values, np.nan)
+        corr_np = np.array(corr.values, dtype=float, copy=True)
+        np.fill_diagonal(corr_np, np.nan)
+        corr_vals = pd.DataFrame(corr_np, index=corr.index, columns=corr.columns)
         unstacked = corr_vals.unstack().dropna()
 
-        min_pair = unstacked.idxmin()
-        min_corr_val = unstacked.min()
-
-        max_pair = unstacked.idxmax()
-        max_corr_val = unstacked.max()
-
-        mean_corr = unstacked.mean()
+        if len(unstacked) > 0:
+            min_pair = unstacked.idxmin()
+            min_corr_val = float(unstacked.min())
+            max_pair = unstacked.idxmax()
+            max_corr_val = float(unstacked.max())
+            mean_corr = float(unstacked.mean())
+        else:
+            min_pair = ("N/A", "N/A")
+            min_corr_val = 0.0
+            max_pair = ("N/A", "N/A")
+            max_corr_val = 0.0
+            mean_corr = 0.0
 
         corr_text = (
             f"La correlación promedio entre los activos es de **{mean_corr:.2f}**, lo cual denota un nivel moderado "

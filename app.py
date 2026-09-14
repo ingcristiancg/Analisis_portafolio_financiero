@@ -18,6 +18,7 @@ import io
 import os
 import base64
 import unicodedata
+import traceback
 
 import optimizer
 import agent
@@ -957,6 +958,8 @@ if prep_data is not None:
 
     except Exception as e:
         st.error(f"Error procesando el análisis: {str(e)}")
+        with st.expander("🛠️ Ver diagnóstico técnico del agente"):
+            st.code(traceback.format_exc(), language="python")
 
 else:
     render_academic_cover()
