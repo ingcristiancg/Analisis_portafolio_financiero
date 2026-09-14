@@ -26,12 +26,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copiar el resto del código y archivos del proyecto
 COPY . .
 
-# Exponer el puerto estándar de Streamlit
-EXPOSE 8501
+# Exponer puertos (8501 estándar o variable dinámica PORT)
+EXPOSE 8501 10000
 
-# Comprobación de salud (Healthcheck)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl --fail http://localhost:8501/_stcore/health || exit 1
-
-# Comando de ejecución
-ENTRYPOINT ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Comando de ejecución con soporte dinámico para Render ($PORT) y modo headless
+CMD ["sh", "-c", "streamlit run app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]

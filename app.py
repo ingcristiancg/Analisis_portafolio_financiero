@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 import io
 import os
 import base64
+import unicodedata
 
 import optimizer
 import agent
@@ -30,7 +31,7 @@ NUM_MONTE_CARLO = 1000      # Regla estricta: 1,000 carteras aleatorias
 
 # Configuración de página
 st.set_page_config(
-    page_title="Plataforma Cuantitativa Markowitz & Agente IA",
+    page_title="CgApp • Plataforma Cuantitativa Markowitz & Agente IA",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -44,6 +45,10 @@ st.markdown("""
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
+
+    /* Ocultar pie y marcas por defecto para destacar CgApp */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     
     .main-header {
         background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0369a1 100%);
@@ -162,6 +167,28 @@ def get_profile_base64() -> str:
     return ""
 
 
+def find_demo_filepath() -> str:
+    """Busca el archivo histórico de acciones con tolerancia total a codificaciones Unicode en Linux/Docker."""
+    candidates = [
+        "Historico_Acciones.xlsx",
+        "Histórico_Acciones.xlsx",
+        "Histórico_Acciones.xlsx",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    # Búsqueda dinámica en el directorio
+    try:
+        for fname in os.listdir("."):
+            if fname.endswith(".xlsx") and not fname.startswith("~$") and not fname.startswith("test"):
+                norm = unicodedata.normalize("NFC", fname).lower()
+                if "historico" in norm or "acciones" in norm:
+                    return fname
+    except Exception:
+        pass
+    return "Historico_Acciones.xlsx"
+
+
 def render_academic_cover():
     """Renderiza la portada académica oficial exactamente como está estructurada en portada.docx."""
     logo_b64 = get_logo_base64()
@@ -238,14 +265,14 @@ st.markdown(f"""
 <div class="main-header">
     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
         <div>
-            <h1>📈 Plataforma Cuantitativa Markowitz & Agente IA</h1>
+            <h1>📈 CgApp • Plataforma Cuantitativa Markowitz & Agente IA</h1>
             <p>Portafolio diversificado usando rendimientos reales | Broward International University</p>
         </div>
         <div style="display: flex; align-items: center; gap: 10px; background: rgba(255,255,255,0.16); padding: 5px 14px 5px 8px; border-radius: 30px; border: 1px solid rgba(255,255,255,0.25);">
             {prof_header_avatar}
             <div style="text-align: left;">
                 <div style="font-size: 0.85rem; font-weight: 700; color: #ffffff; line-height: 1.1;">Cristian Córdoba</div>
-                <div style="font-size: 0.72rem; color: #cbd5e1;">MBA Financial AI</div>
+                <div style="font-size: 0.72rem; color: #cbd5e1;">CgApp Financial AI</div>
             </div>
         </div>
     </div>
@@ -254,6 +281,13 @@ st.markdown(f"""
 
 # Barra Lateral (Sidebar)
 with st.sidebar:
+    st.markdown("""
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">
+        <span style="font-size: 1.25rem; font-weight: 800; color: #0284c7; letter-spacing: -0.5px;">CgApp</span>
+        <span style="background: #e0f2fe; color: #0369a1; font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 12px;">FinAI v2.0</span>
+    </div>
+    """, unsafe_allow_html=True)
+
     if os.path.exists("assets/logo_universidad.png"):
         st.image("assets/logo_universidad.png", width=180)
     st.markdown("""
@@ -284,6 +318,7 @@ with st.sidebar:
 
     st.markdown("---")
     
+    demo_filepath = find_demo_filepath()
     if "Archivo Histórico" in data_mode:
         st.markdown("#### 📁 Carga de Archivo Local")
         uploaded_file = st.file_uploader(
@@ -291,8 +326,8 @@ with st.sidebar:
             type=["xlsx", "xls", "csv"],
             help="Sube un archivo con precios de cierre mensuales. Si viene ordenado de más reciente a más antiguo, se invierte automáticamente."
         )
-        if uploaded_file is None and os.path.exists("Histórico_Acciones.xlsx"):
-            if st.button("📁 Cargar Archivo Demo ('Histórico_Acciones.xlsx')", width="stretch"):
+        if uploaded_file is None and demo_filepath and os.path.exists(demo_filepath):
+            if st.button(f"📁 Cargar Archivo Demo ('{os.path.basename(demo_filepath)}')", width="stretch"):
                 st.session_state["loaded_demo"] = True
 
     else:
@@ -351,12 +386,13 @@ data_source_name = ""
 
 if "Archivo Histórico" in data_mode:
     file_to_process = None
+    demo_filepath = find_demo_filepath()
     if uploaded_file is not None:
         file_to_process = uploaded_file
         data_source_name = f"Archivo cargado: {uploaded_file.name}"
-    elif st.session_state.get("loaded_demo", True) and os.path.exists("Histórico_Acciones.xlsx"):
-        file_to_process = "Histórico_Acciones.xlsx"
-        data_source_name = "Archivo Demo: Histórico_Acciones.xlsx"
+    elif st.session_state.get("loaded_demo", True) and demo_filepath and os.path.exists(demo_filepath):
+        file_to_process = demo_filepath
+        data_source_name = f"Archivo Base: {os.path.basename(demo_filepath)}"
 
     if file_to_process is not None:
         try:
