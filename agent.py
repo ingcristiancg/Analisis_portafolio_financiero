@@ -70,16 +70,27 @@ class QuantitativePortfolioAgent:
         # 7. Recomendaciones tácticas de gestión
         recommendations = self._generate_recommendations(opt_data, stats_data, bench_data)
 
-        # Síntesis ejecutiva consolidada
+        # Síntesis ejecutiva consolidada con soporte para decisiones adaptativas
+        risk_label = f"σ_p ≤ {opt_data['target_max_std']:.2%}"
+        adaptation_note = ""
+        if opt_data.get("adapted_risk"):
+            adaptation_note = (
+                f"\n\n🚨 **Decisión Cuantitativa Autónoma del Agente:** "
+                f"La restricción nominal de riesgo ({opt_data.get('requested_max_std', 0.07):.2%}) era matemáticamente inalcanzable "
+                f"para este conjunto de activos (el riesgo mínimo absoluto alcanzable por el mercado es de {opt_data.get('min_possible_std', opt_vol):.2%}). "
+                f"El Agente adaptó autónomamente la restricción a la Cartera de Mínima Varianza Global ({opt_vol*100:.2f}%) "
+                f"para evitar el fallo del sistema y proveer una solución matemáticamente óptima, defensiva y válida."
+            )
+
         executive_summary = (
-            f"El Agente Cuantitativo ha analizado {len(stock_cols)} activos del mercado bursátil mexicano "
+            f"El Agente Cuantitativo ha analizado {len(stock_cols)} activos del mercado bursátil "
             f"a lo largo de {prep_data['num_periods']} meses continuos ({time_audit['period_str']}). "
-            f"Bajo la restricción estricta de riesgo mensual (σ_p ≤ {opt_data['target_max_std']:.1%}), "
+            f"Bajo la restricción de riesgo mensual ({risk_label}), "
             f"la cartera óptima de Markowitz alcanza un rendimiento mensual esperado de {opt_ret*100:.2f}% "
             f"con una volatilidad mensual de {opt_vol*100:.2f}% (Ratio de Sharpe mensual: {opt_sharpe:.4f}). "
-            f"La cartera concentra su capital en {opt_insights['active_assets_count']} activos líderes que maximizan el retorno "
-            f"gracias a correlaciones moderadas y perfiles de retorno positivos, superando al "
-            f"{mc_insights['percentile_return']:.1f}% de las 1,000 carteras simuladas por Monte Carlo."
+            f"La cartera concentra su capital en {opt_insights['active_assets_count']} activos líderes que maximizan la relación retorno-riesgo, "
+            f"superando al {mc_insights['percentile_return']:.1f}% de las 1,000 carteras simuladas por Monte Carlo."
+            f"{adaptation_note}"
         )
 
         return {
@@ -91,6 +102,8 @@ class QuantitativePortfolioAgent:
             "mc_insights": mc_insights,
             "bench_insights": bench_insights,
             "recommendations": recommendations,
+            "adapted_risk": opt_data.get("adapted_risk", False),
+            "risk_adjustment_reason": opt_data.get("risk_adjustment_reason"),
         }
 
     def _audit_time_series(self, prep_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -321,35 +334,47 @@ class QuantitativePortfolioAgent:
         4. Recomendación Práctica para el Comité de Inversión
         """
         # Si hay API key disponible y provider es gemini
-        if self.api_key and self.provider == "gemini":
+        if self.api_key and self.provider in ["gemini", "google"]:
             try:
                 import urllib.request
                 import json
                 
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+                # Intentar con gemini-1.5-flash o gemini-2.5-flash
+                endpoints = [
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={self.api_key}",
+                ]
                 prompt = (
                     f"Actúa como un Director Cuantitativo de Inversiones (CIO) de un Fondo de Cobertura y Profesor de Finanzas MBA.\n"
                     f"Contexto Cuantitativo del Portafolio Analizado:\n"
                     f"- Rendimiento mensual esperado de la Cartera Óptima: {context.get('opt_ret', 0)*100:.3f}%\n"
                     f"- Volatilidad mensual esperada (σ_p): {context.get('opt_vol', 0)*100:.3f}%\n"
-                    f"- Restricción de riesgo mensual estricta: σ_p <= {context.get('target_std', 0.07)*100:.1f}%\n"
+                    f"- Restricción de riesgo mensual requerida: σ_p <= {context.get('target_std', 0.07)*100:.2f}%\n"
+                    f"- Riesgo mínimo alcanzable del mercado: {context.get('min_possible_std', context.get('opt_vol', 0.07))*100:.2f}%\n"
+                    f"- ¿Hubo adaptación autónoma de riesgo?: {'SÍ' if context.get('adapted_risk') else 'NO'}\n"
+                    f"- Razón de adaptación: {context.get('risk_adjustment_reason', 'N/A')}\n"
                     f"- Ponderaciones óptimas calculadas: {context.get('weights_summary', '')}\n"
                     f"- Benchmark IPC: {context.get('bench_summary', 'Rendimiento ~0.10% mensual')}\n\n"
                     f"Pregunta del Usuario: {question}\n\n"
                     f"Instrucciones de Respuesta:\n"
                     f"Escribe una respuesta sumamente profesional, descriptiva, constructiva y detallada.\n"
                     f"Organiza tu respuesta en las siguientes 4 secciones claramente tituladas:\n"
-                    f"1. 📊 **Diagnóstico Cuantitativo** (con cifras precisas del portafolio)\n"
-                    f"2. 📐 **Fundamentación Teórica y Matemática de Markowitz**\n"
-                    f"3. 🛡️ **Análisis de Sensibilidad y Riesgo Macroeconómico (México/BMV)**\n"
+                    f"1. 📊 **Diagnóstico Cuantitativo** (con cifras precisas del portafolio y explicación de decisiones adaptativas)\n"
+                    f"2. 📐 **Fundamentación Teórica y Matemática de Markowitz** (Condiciones KKT, región factible o varianza mínima)\n"
+                    f"3. 🛡️ **Análisis de Sensibilidad y Riesgo Macroeconómico**\n"
                     f"4. 💼 **Recomendaciones Ejecutivas para el Comité de Inversión**\n"
                     f"Prohibido anualizar los datos; mantén todo en escala mensual."
                 )
                 payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
-                req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-                with urllib.request.urlopen(req, timeout=12) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                
+                for url in endpoints:
+                    try:
+                        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            return data["candidates"][0]["content"]["parts"][0]["text"]
+                    except Exception:
+                        continue
             except Exception:
                 pass
 
@@ -358,8 +383,33 @@ class QuantitativePortfolioAgent:
         opt_ret_str = f"{context.get('opt_ret', 0.016)*100:.2f}%"
         opt_vol_str = f"{context.get('opt_vol', 0.07)*100:.2f}%"
         weights_summary = context.get('weights_summary', 'PEÑOLES: 37.2%, ASUR: 34.0%, GRUMA: 22.5%, FEMSA: 6.4%')
+        is_adapted = context.get("adapted_risk", False)
+        min_p_std = context.get("min_possible_std", context.get("opt_vol", 0.07))
 
-        if any(w in q for w in ["cero", "0%", "descart", "excluid", "por qué", "cemex", "bimbo", "walmart"]):
+        if is_adapted or any(w in q for w in ["adapt", "calibr", "mínima varianza", "fallo", "error", "7.25", "infeasible", "factible", "decisi", "restricci"]):
+            return (
+                "### 📋 Dictamen Cuantitativo: Decisión Autónoma de Adaptación de Restricción de Riesgo\n\n"
+                "#### 1. 📊 Diagnóstico Cuantitativo y Numérico\n"
+                f"La restricción normativa nominal del sistema estipulaba un tope de riesgo mensual de **7.00%**. "
+                f"Sin embargo, tras auditar la matriz de covarianza de los activos de este archivo, el algoritmo determinó que la **Cartera de Mínima Varianza Global** "
+                f"posee una volatilidad intrínseca de **{min_p_std*100:.2f}%**. Dado que 7.00% < {min_p_std*100:.2f}%, el conjunto de carteras factibles bajo la restricción inicial era **matemáticamente vacío**.\n"
+                f"El Agente Cuantitativo tomó la decisión autónoma de calibrar la restricción a **{opt_vol_str}**, resolviendo el portafolio óptimo defensivo con un rendimiento mensual de **{opt_ret_str}**.\n\n"
+                "#### 2. 📐 Fundamentación Matemática de Markowitz (Región Factible y Cartera de Mínima Varianza)\n"
+                "En la formulación canónica de Markowitz:\n"
+                "$$\\min_{w} \\frac{1}{2} w^T \\Sigma w \\quad \\text{sujeto a} \\quad \\sum w_i = 1, \\quad w_i \\ge 0$$\n"
+                "El punto de anclaje inferior de la frontera eficiente es el vértice hiperbólico $\\sigma_{\\min}$. Ninguna combinación lineal convexa de estos activos puede generar una volatilidad inferior a $\\sigma_{\\min}$ sin apalancamiento negativo o ventas en corto.\n"
+                "• Exigir $\\sigma_p \\le 7.00\\%$ hubiera forzado un fallo no convergente en SLSQP (infeasibility).\n"
+                "• Al anclar en el mínimo global, la solución cumple con las condiciones KKT de Karush-Kuhn-Tucker en la frontera del símplex.\n\n"
+                "#### 3. 🛡️ Análisis de Sensibilidad y Riesgo Macroeconómico\n"
+                f"Una volatilidad mínima de {min_p_std*100:.2f}% mensual refleja que los activos del archivo poseen covarianzas positivas correlacionadas o volatilidades individuales elevadas durante el periodo analizado. "
+                "Para operar por debajo del 7.00% mensual en el mercado real, se requiere agregar activos con correlación nula o negativa (como Bonos M, Cetes o coberturas cambiarias).\n\n"
+                "#### 4. 💼 Recomendación para el Comité de Inversión\n"
+                "1. **Validar la calibración a Mínima Varianza**: La estructura calculada representa la cartera más segura posible para este universo de activos.\n"
+                "2. **Apertura de Restricción**: Si el mandato del fondo tolera mayor riesgo, flexibilice la cota mensual al 8.00% o 10.00% para capturar mayores rendimientos esperados.\n"
+                "3. **Diversificación de Activos**: Incorpore renta fija soberana a corto plazo (Cetes a 28 días) para reducir la volatilidad agregada del portafolio."
+            )
+
+        elif any(w in q for w in ["cero", "0%", "descart", "excluid", "por qué", "cemex", "bimbo", "walmart"]):
             return (
                 "### 📋 Dictamen Cuantitativo: Explicación de Ponderaciones y Activos con Peso 0%\n\n"
                 "#### 1. 📊 Diagnóstico Cuantitativo y Numérico\n"

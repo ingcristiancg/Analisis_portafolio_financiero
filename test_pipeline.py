@@ -121,6 +121,23 @@ class TestMarkowitzPipeline(unittest.TestCase):
         self.assertGreater(os.path.getsize(test_pdf), 10000)
         os.remove(test_pdf)
 
+    def test_adaptive_risk_on_infeasible_constraint(self):
+        """Regla de Autonomía Adaptativa: Si max_std < min_possible_std, no falla y adapta."""
+        cg_file = "/Users/cristinancordoba/Desktop/Maestria/SM26_BIA6042_Financial Management with Artificial Intelligence MBA/Historico_Acciones CG.xlsx"
+        if os.path.exists(cg_file):
+            # Probar explícitamente la hoja report (donde min_possible_std es 7.25% > 7.00%)
+            prep_cg = optimizer.load_and_preprocess_data(cg_file, sheet_name="report")
+            opt_cg = optimizer.optimize_markowitz_max_return(prep_cg["stock_returns"], max_std=0.07, adaptive_risk=True)
+            self.assertTrue(opt_cg["adapted_risk"])
+            self.assertGreater(opt_cg["target_max_std"], 0.07)
+            self.assertAlmostEqual(opt_cg["volatility"], opt_cg["min_possible_std"], places=4)
+            self.assertAlmostEqual(np.sum(opt_cg["weights"]), 1.0, places=5)
+            self.assertTrue((opt_cg["weights"] >= -1e-6).all())
+
+            # Verificar que el agente documenta la decisión
+            rep_cg = self.ag.generate_autonomous_report(prep_cg, optimizer.compute_monthly_statistics(prep_cg["stock_returns"]), opt_cg, self.mc, None)
+            self.assertIn("Decisión Cuantitativa Autónoma", rep_cg["executive_summary"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -123,6 +123,35 @@ st.markdown("""
         margin-top: 10px;
     }
 
+    .friendly-decision-banner {
+        background: linear-gradient(135deg, #f0fdf4 0%, #f0f9ff 100%);
+        border: 1px solid #bbf7d0;
+        border-left: 6px solid #10b981;
+        border-radius: 14px;
+        padding: 20px 24px;
+        margin: 16px 0 22px 0;
+        box-shadow: 0 4px 14px rgba(16, 185, 129, 0.08);
+    }
+
+    .restriction-admin-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 22px 26px;
+        margin: 16px 0 24px 0;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+    }
+
+    .agent-decision-card {
+        background: linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%);
+        border: 1px solid #bae6fd;
+        border-left: 6px solid #0284c7;
+        border-radius: 12px;
+        padding: 18px 22px;
+        margin: 16px 0 20px 0;
+        box-shadow: 0 4px 14px rgba(2, 132, 199, 0.08);
+    }
+
     .academic-cover-sheet {
         background: #ffffff;
         border: 1px solid #cbd5e1;
@@ -134,6 +163,11 @@ st.markdown("""
         text-align: center;
         font-family: 'Times New Roman', Times, Georgia, serif;
         color: #0f172a;
+    }
+
+    /* Blindaje contra alteraciones del DOM de React provocadas por traducción automática */
+    .notranslate {
+        translate: no !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -396,8 +430,48 @@ if "Archivo Histórico" in data_mode:
         data_source_name = f"Archivo Base: {os.path.basename(demo_filepath)}"
 
     if file_to_process is not None:
+        selected_sheet = None
+        # Inspeccionar si es Excel con múltiples hojas para otorgar control al usuario
+        is_excel_file = False
+        if hasattr(file_to_process, "name") and str(file_to_process.name).lower().endswith((".xlsx", ".xls")):
+            is_excel_file = True
+        elif isinstance(file_to_process, str) and file_to_process.lower().endswith((".xlsx", ".xls")):
+            is_excel_file = True
+
+        if is_excel_file:
+            try:
+                xl_inspect = pd.ExcelFile(file_to_process)
+                if len(xl_inspect.sheet_names) > 1:
+                    # Seleccionar la mejor hoja candidata por defecto
+                    best_sheet_name = xl_inspect.sheet_names[0]
+                    max_sc = -1.0
+                    for s in xl_inspect.sheet_names:
+                        sc = 0.0
+                        s_low = str(s).lower()
+                        if any(k in s_low for k in ["crecimiento", "precios", "prices", "rendimientos", "returns", "datos", "data", "report", "historico"]):
+                            sc += 40.0
+                        try:
+                            df_s = xl_inspect.parse(s)
+                            sc += min(len(df_s), 500) * 2.0 + len(df_s.columns) * 3.0
+                            if len(df_s) < 4:
+                                sc -= 500.0
+                        except Exception:
+                            pass
+                        if sc > max_sc:
+                            max_sc = sc
+                            best_sheet_name = s
+                    def_idx = xl_inspect.sheet_names.index(best_sheet_name) if best_sheet_name in xl_inspect.sheet_names else 0
+                    selected_sheet = st.sidebar.selectbox(
+                        "📑 Hoja de Cálculo del Archivo:",
+                        xl_inspect.sheet_names,
+                        index=def_idx,
+                        help="Detectamos múltiples hojas en el archivo. Puedes seleccionar la hoja de cotizaciones o rendimientos a optimizar."
+                    )
+            except Exception:
+                pass
+
         try:
-            prep_data = optimizer.load_and_preprocess_data(file_to_process)
+            prep_data = optimizer.load_and_preprocess_data(file_to_process, sheet_name=selected_sheet)
         except Exception as e:
             st.error(f"Error procesando el archivo: {e}")
 
@@ -442,27 +516,210 @@ else:
         st.error(f"Error conectando a la API bursátil: {e}")
 
 
-# Ejecutar Pipeline Cuantitativo
+# Calibración interactiva de riesgo y ejecución del pipeline
 if prep_data is not None:
     try:
         # 1. Estadísticas mensuales (PROHIBIDO ANUALIZAR)
         stats_data = optimizer.compute_monthly_statistics(prep_data["stock_returns"])
 
-        # 2. Optimización Markowitz con restricción normativa fija (sigma <= 0.07)
-        opt_data = optimizer.optimize_markowitz_max_return(prep_data["stock_returns"], max_std=TARGET_RISK)
+        # 2. Análisis previo de riesgo mínimo del mercado (punto de anclaje)
+        min_var_check = optimizer.optimize_minimum_variance(prep_data["stock_returns"])
+        min_market_risk = float(min_var_check["volatility"])
 
-        # 3. Monte Carlo normativo (1,000 carteras aleatorias)
+        slider_min = max(0.005, round(min_market_risk, 4))
+        slider_max = max(0.30, round(min_market_risk * 3.0, 2))
+        default_risk_val = round(max(TARGET_RISK, min_market_risk), 4)
+
+        # Estado reactivo en session_state para permitir aumentar o bajar fluidamente
+        if "user_target_risk" not in st.session_state:
+            st.session_state["user_target_risk"] = default_risk_val
+        elif st.session_state["user_target_risk"] < slider_min:
+            st.session_state["user_target_risk"] = slider_min
+        elif st.session_state["user_target_risk"] > slider_max:
+            st.session_state["user_target_risk"] = slider_max
+
+        if "user_max_weight" not in st.session_state:
+            st.session_state["user_max_weight"] = 1.0
+
+        chosen_target_risk = float(st.session_state["user_target_risk"])
+        chosen_max_weight = float(st.session_state["user_max_weight"])
+        min_w_allowed = round(1.0 / max(len(prep_data["stock_cols"]), 1), 2)
+
+        # Control interactivo de riesgo en barra lateral
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown("#### 🎯 Calibración de Restricciones")
+            sidebar_risk = st.slider(
+                "Tope de Volatilidad Mensual (σ_p):",
+                min_value=slider_min,
+                max_value=slider_max,
+                value=chosen_target_risk,
+                step=0.0025,
+                format="%.2f%%",
+                key="sidebar_risk_slider",
+                help="Cota superior de volatilidad mensual. El límite inferior está delimitado por el riesgo mínimo alcanzable."
+            )
+            if abs(sidebar_risk - chosen_target_risk) > 1e-4:
+                st.session_state["user_target_risk"] = sidebar_risk
+                st.rerun()
+
+            if min_market_risk > TARGET_RISK:
+                st.info(f"💡 Riesgo mínimo intrínseco del mercado: **{min_market_risk:.2%}** mensual.")
+            else:
+                st.caption(f"✓ Riesgo mínimo del mercado: **{min_market_risk:.2%}** mensual.")
+
+        # 3. Optimización Markowitz con Autonomía Adaptativa y límites por activo
+        opt_data = optimizer.optimize_markowitz_max_return(
+            prep_data["stock_returns"],
+            max_std=chosen_target_risk,
+            adaptive_risk=True,
+            max_weight_per_asset=chosen_max_weight,
+        )
+
+        # 4. Monte Carlo normativo (1,000 carteras aleatorias)
         mc_data = optimizer.run_monte_carlo_simulation(prep_data["stock_returns"], num_portfolios=NUM_MONTE_CARLO)
 
-        # 4. Benchmark IPC
+        # 5. Benchmark IPC
         bench_data = optimizer.calculate_benchmark_metrics(opt_data["portfolio_returns"], prep_data["ipc_returns"])
 
-        # 5. Agente Cuantitativo Autónomo
+        # 6. Agente Cuantitativo Autónomo
         quant_agent = agent.QuantitativePortfolioAgent(api_key=api_key_input)
         agent_report = quant_agent.generate_autonomous_report(prep_data, stats_data, opt_data, mc_data, bench_data)
 
         # Confirmación serena y confiable
         st.success(f"✅ **Base de Datos Validada**: {data_source_name} | {prep_data['num_periods']} meses cronológicos ({prep_data['start_date'].strftime('%b %Y')} a {prep_data['end_date'].strftime('%b %Y')}).")
+
+        # ==========================================
+        # MENSAJE AMABLE Y CÁLIDO DEL AGENTE IA (SI HUBO ADAPTACIÓN DE RIESGO)
+        # ==========================================
+        if opt_data.get("adapted_risk"):
+            st.markdown(f"""
+            <div class="friendly-decision-banner notranslate">
+                <div style="display: flex; align-items: flex-start; gap: 14px;">
+                    <span style="font-size: 2.2rem; line-height: 1;">🤝</span>
+                    <div>
+                        <h4 style="margin: 0 0 6px 0; color: #065f46; font-size: 1.15rem; font-weight: 700;">
+                            ¡Hola! Calibramos tu portafolio de manera amable, segura y sin errores
+                        </h4>
+                        <p style="margin: 0 0 8px 0; color: #1e293b; font-size: 0.95rem; line-height: 1.55;">
+                            Revisamos con cuidado los activos de tu archivo y encontramos que la combinación más segura y defensiva que permite 
+                            este mercado tiene una volatilidad de <b>{opt_data['min_possible_std']*100:.2f}% mensual</b> (Cartera de Mínima Varianza Global).
+                        </p>
+                        <p style="margin: 0 0 10px 0; color: #334155; font-size: 0.92rem; line-height: 1.55;">
+                            Para cuidar tu experiencia y asegurarte siempre una respuesta financiera matemáticamente válida y óptima, 
+                            adaptamos con serenidad la meta inicial (7.00%) a este nivel óptimo de <b>{opt_data['volatility']*100:.2f}%</b>.
+                        </p>
+                        <div style="background: rgba(16, 185, 129, 0.12); border-left: 3px solid #10b981; border-radius: 6px; padding: 8px 12px; font-size: 0.88rem; color: #047857;">
+                            💡 <b>Tú tienes el control total:</b> En el nuevo <b>Módulo de Administración de Restricciones</b> a continuación puedes 
+                            <b>aumentar o bajar</b> el riesgo libremente y regular la concentración de capital a tu gusto.
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ==========================================
+        # MÓDULO INTERACTIVO DE ADMINISTRACIÓN DE RESTRICCIONES (AUMENTAR O BAJAR)
+        # ==========================================
+        with st.container():
+            st.markdown(f"""
+            <div class="restriction-admin-card notranslate">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; margin-bottom: 14px;">
+                    <div>
+                        <h3 style="margin: 0; color: #0f172a; font-size: 1.18rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                            <span>🎛️</span> Centro de Administración de Restricciones Cuantitativas
+                        </h3>
+                        <p style="margin: 3px 0 0 0; color: #64748b; font-size: 0.88rem;">
+                            Aquí puedes <b>aumentar o bajar</b> las restricciones del modelo. El portafolio, las ponderaciones y los reportes se actualizan automáticamente en tiempo real.
+                        </p>
+                    </div>
+                    <div>
+                        <span style="background: #e0f2fe; color: #0369a1; padding: 5px 12px; border-radius: 20px; font-size: 0.82rem; font-weight: 600;">
+                            🛡️ Riesgo Mínimo del Mercado: {min_market_risk*100:.2f}%
+                        </span>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            mod_col1, mod_col2 = st.columns([1.25, 1.0])
+
+            with mod_col1:
+                st.markdown(f"##### 🎯 Restricción de Riesgo Mensual (Cota Actual: **{chosen_target_risk*100:.2f}%**)")
+                
+                # Botones de ajuste rápido para aumentar o bajar
+                b1, b2, b3, b4 = st.columns(4)
+                with b1:
+                    if st.button("➖ Bajar (-0.5%)", key="btn_dec_risk", use_container_width=True, help="Disminuye la restricción de riesgo en 0.50% mensual"):
+                        st.session_state["user_target_risk"] = max(slider_min, round(chosen_target_risk - 0.005, 4))
+                        st.rerun()
+                with b2:
+                    if st.button("➕ Subir (+0.5%)", key="btn_inc_risk", use_container_width=True, help="Aumenta la restricción de riesgo en 0.50% mensual"):
+                        st.session_state["user_target_risk"] = min(slider_max, round(chosen_target_risk + 0.005, 4))
+                        st.rerun()
+                with b3:
+                    if st.button(f"🛡️ Mínimo ({min_market_risk*100:.1f}%)", key="btn_min_risk", use_container_width=True, help="Fija la cota al menor riesgo físicamente posible"):
+                        st.session_state["user_target_risk"] = slider_min
+                        st.rerun()
+                with b4:
+                    growth_target = min(slider_max, round(min_market_risk + 0.03, 4))
+                    if st.button(f"🚀 Retorno ({growth_target*100:.1f}%)", key="btn_growth_risk", use_container_width=True, help="Permite mayor tolerancia de riesgo para buscar retornos más altos"):
+                        st.session_state["user_target_risk"] = growth_target
+                        st.rerun()
+
+                # Deslizador continuo
+                slider_val = st.slider(
+                    "Desliza para calibrar con precisión el tope de riesgo (σ_p):",
+                    min_value=slider_min,
+                    max_value=slider_max,
+                    value=chosen_target_risk,
+                    step=0.0025,
+                    format="%.2f%%",
+                    key="main_slider_risk",
+                    help="Desplaza hacia la derecha para aumentar la tolerancia al riesgo o a la izquierda para bajarla hacia la cota mínima."
+                )
+                if abs(slider_val - chosen_target_risk) > 1e-4:
+                    st.session_state["user_target_risk"] = slider_val
+                    st.rerun()
+
+            with mod_col2:
+                st.markdown(f"##### 🧱 Concentración Máxima por Acción (Tope: **{chosen_max_weight*100:.0f}%**)")
+                
+                wb1, wb2, wb3 = st.columns(3)
+                with wb1:
+                    if st.button("Libre (100%)", key="btn_w_100", use_container_width=True, help="Sin restricción de concentración individual"):
+                        st.session_state["user_max_weight"] = 1.0
+                        st.rerun()
+                with wb2:
+                    if st.button("Moderado (40%)", key="btn_w_40", use_container_width=True, help="Ninguna acción supera el 40%"):
+                        st.session_state["user_max_weight"] = 0.40
+                        st.rerun()
+                with wb3:
+                    if st.button("Diversificado (25%)", key="btn_w_25", use_container_width=True, help="Ninguna acción supera el 25%"):
+                        st.session_state["user_max_weight"] = 0.25
+                        st.rerun()
+
+                slider_w_val = st.slider(
+                    "Desliza para acotar la ponderación máxima por activo (w_i):",
+                    min_value=min_w_allowed,
+                    max_value=1.0,
+                    value=chosen_max_weight,
+                    step=0.05,
+                    format="%.0f%%",
+                    key="main_slider_weight",
+                    help="Controla el porcentaje máximo de capital asignado a un solo activo para forzar mayor diversificación."
+                )
+                if abs(slider_w_val - chosen_max_weight) > 1e-4:
+                    st.session_state["user_max_weight"] = slider_w_val
+                    st.rerun()
+
+            st.markdown("""
+            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; margin-top: 10px; font-size: 0.85rem; color: #475569;">
+                💡 <b>Dinámica Cuantitativa</b>: Al <b>aumentar</b> la cota de riesgo, permites que el modelo busque acciones de mayor rendimiento esperado. 
+                Al <b>bajarla</b> hacia el riesgo mínimo, el portafolio prioriza la estabilidad defensiva. 
+                Si <b>acotas</b> el peso por activo (ej. ≤ 35%), evitas concentrar el capital en pocas emisoras.
+            </div>
+            """, unsafe_allow_html=True)
 
         # ==========================================
         # FILA DE KPIs INSTITUCIONALES
@@ -482,7 +739,7 @@ if prep_data is not None:
             <div class="metric-card">
                 <div class="metric-label">Volatilidad Mensual Óptima</div>
                 <div class="metric-value">{opt_data['volatility']*100:.2f}%</div>
-                <div class="metric-sub">Restricción: ≤ {TARGET_RISK*100:.1f}% mensual</div>
+                <div class="metric-sub">Restricción: ≤ {opt_data['target_max_std']*100:.2f}% mensual</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -619,10 +876,10 @@ if prep_data is not None:
 
                 # Línea de restricción en gris institucional
                 fig_mc.add_vline(
-                    x=TARGET_RISK * 100,
+                    x=opt_data["target_max_std"] * 100,
                     line_dash="dash",
                     line_color="#475569",
-                    annotation_text="Límite σ_p ≤ 7.0%",
+                    annotation_text=f"Límite σ_p ≤ {opt_data['target_max_std']*100:.1f}%",
                     annotation_position="top left",
                 )
 
@@ -699,14 +956,17 @@ if prep_data is not None:
             st.markdown("#### 💬 Consultas Especializadas al Agente Cuantitativo")
             st.markdown("Selecciona una pregunta de análisis financiero o escribe una consulta personalizada para el Comité de Inversión:")
             
-            preset_questions = [
+            preset_questions = []
+            if opt_data.get("adapted_risk"):
+                preset_questions.append("🤖 ¿Por qué el Agente adaptó de forma autónoma la restricción de riesgo en este archivo?")
+            preset_questions.extend([
                 "⚖️ ¿Por qué ciertos activos tienen peso 0% y otros concentran la cartera?",
                 "🔄 ¿Cuál es el protocolo y cadencia de rebalanceo recomendado?",
                 "🛡️ ¿Cómo responde la cartera si cambia la volatilidad del mercado?",
                 "🚨 ¿Por qué está estrictamente prohibido anualizar los datos?",
                 "📊 Diagnóstico integral de la Cartera Óptima de Markowitz",
                 "✍️ Escribir otra pregunta personalizada...",
-            ]
+            ])
 
             selected_preset = st.selectbox("Seleccionar consulta:", preset_questions, index=0)
 
@@ -726,7 +986,10 @@ if prep_data is not None:
                                 "opt_ret": opt_data["expected_return"],
                                 "opt_vol": opt_data["volatility"],
                                 "opt_sharpe": opt_data["sharpe_ratio"],
-                                "target_std": TARGET_RISK,
+                                "target_std": opt_data["target_max_std"],
+                                "min_possible_std": opt_data.get("min_possible_std", opt_data["volatility"]),
+                                "adapted_risk": opt_data.get("adapted_risk", False),
+                                "risk_adjustment_reason": opt_data.get("risk_adjustment_reason", ""),
                                 "weights_summary": ", ".join([f"{r['Activo']}: {r['Porcentaje (%)']:.1f}%" for _, r in opt_data['weights_df'].iterrows() if r['Ponderación Óptima (w)'] > 0.005]),
                             }
                             answer = quant_agent.ask_agent(final_query, context)

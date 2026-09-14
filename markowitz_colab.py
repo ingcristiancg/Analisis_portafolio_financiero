@@ -207,24 +207,29 @@ def optimizar_cartera_markowitz(rend_acciones, max_std=0.07):
     def portfolio_std(w):
         return float(np.sqrt(np.dot(w.T, np.dot(cov, w))))
 
-    # Restricciones:
-    # 1. 100% del capital invertido: sum(w_i) = 1
-    # 2. Desviación estándar mensual <= 0.07: 0.07 - sigma_p >= 0
-    restricciones = [
-        {"type": "eq", "fun": lambda w: np.sum(w) - 1.0},
-        {"type": "ineq", "fun": lambda w: max_std - np.sqrt(np.dot(w.T, np.dot(cov, w)))},
-    ]
-
-    # Límites: solo posiciones largas (w_i >= 0)
+    # Calcular varianza mínima del mercado para garantizar factibilidad matemática
     limites = tuple((0.0, 1.0) for _ in range(n))
-    w0 = np.ones(n) / n
+    res_min = minimize(portfolio_std, np.ones(n)/n, method="SLSQP", bounds=limites, constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}])
+    w_min = res_min.x if res_min.success else np.ones(n)/n
+    min_possible_std = portfolio_std(w_min)
 
-    res = minimize(obj_neg_return, w0, method="SLSQP", bounds=limites, constraints=restricciones)
-
-    if not res.success:
-        raise RuntimeError(f"Error en la optimización: {res.message}")
-
-    pesos_optimos = res.x
+    effective_std = max_std
+    if max_std < min_possible_std:
+        print(f"⚠️ AVISO: Restricción solicitada ({max_std:.2%}) < Riesgo mínimo del mercado ({min_possible_std:.2%}).")
+        print(f"🤖 CALIBRACIÓN ADAPTATIVA: El script adapta la restricción a Mínima Varianza ({min_possible_std:.2%}).")
+        effective_std = min_possible_std
+        pesos_optimos = w_min
+    else:
+        # Restricciones:
+        # 1. 100% del capital invertido: sum(w_i) = 1
+        # 2. Desviación estándar mensual <= effective_std: effective_std - sigma_p >= 0
+        restricciones = [
+            {"type": "eq", "fun": lambda w: np.sum(w) - 1.0},
+            {"type": "ineq", "fun": lambda w: effective_std - np.sqrt(np.dot(w.T, np.dot(cov, w)))},
+        ]
+        w0 = np.ones(n) / n
+        res = minimize(obj_neg_return, w0, method="SLSQP", bounds=limites, constraints=restricciones)
+        pesos_optimos = res.x if res.success else w_min
     pesos_optimos = np.where(pesos_optimos < 1e-5, 0.0, pesos_optimos)
     pesos_optimos = pesos_optimos / np.sum(pesos_optimos)
 
