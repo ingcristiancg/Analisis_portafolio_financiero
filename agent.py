@@ -207,13 +207,14 @@ class QuantitativePortfolioAgent:
 
         zero_desc = ", ".join(zero_weights["Activo"].tolist()) if len(zero_weights) > 0 else "Ninguno"
 
+        target_risk_val = opt_data.get("target_max_std", 0.07)
         is_bound_active = opt_data["is_constraint_active"]
         budget_text = (
-            "La restricción de riesgo mensual (σ_p ≤ 7.00%) se encuentra activa y saturada exactamente al 7.00%. "
+            f"La restricción de riesgo mensual (σ_p ≤ {target_risk_val*100:.2f}%) se encuentra activa y saturada al límite ({opt_data['volatility']*100:.2f}%). "
             "El algoritmo SLSQP aprovechó todo el presupuesto de volatilidad disponible para alcanzar el máximo retorno mensual esperado."
             if is_bound_active else
             f"La cartera óptima alcanzó su rendimiento máximo con una volatilidad de {opt_data['volatility']*100:.2f}%, "
-            f"por debajo del tope del 7.00%."
+            f"dentro de la cota máxima permitida ({target_risk_val*100:.2f}%)."
         )
 
         explanation = (
@@ -315,12 +316,13 @@ class QuantitativePortfolioAgent:
         stats_data: Dict[str, Any],
         bench_data: Optional[Dict[str, Any]],
     ) -> str:
+        target_risk_val = opt_data.get("target_max_std", 0.07)
         recs = [
             "### Recomendaciones Estratégicas para el Comité de Inversión (MBA Level):",
             "1. **Disciplina de Rebalanceo Dinámico**: Se aconseja un protocolo trimestral complementado con bandas de tolerancia porcentual del ±3.5% absoluto sobre las ponderaciones meta, para mitigar el arrastre por inercia de precios sin incurrir en fricciones transaccionales excesivas.",
             "2. **Ejecución Algorítmica y Liquidez**: Dada la concentración en activos de mediana y alta bursatilidad en la BMV, las órdenes de entrada y rebalanceo deben estructurarse mediante algoritmos TWAP/VWAP para evitar impactos de mercado (market impact).",
-            "3. **Monitoreo Macroeconómico de Banxico y Tipo de Cambio**: Activos de materias primas (como Peñoles) y de logística/turismo (como ASUR) exhiben sensibilidad diferenciada a la paridad USD/MXN y las tasas de interés de Banxico, actuando como cobertura natural ante depreciaciones cambiarias.",
-            "4. **Control del Presupuesto de Riesgo (σ_p ≤ 7.00%)**: Dado que la restricción de volatilidad mensual opera en su cota superior, si el entorno macroeconómico experimenta un choque de volatilidad (VIX o volatilidad histórica al alza), se requerirá trasladar ponderación hacia activos de consumo defensivo.",
+            "3. **Monitoreo Macroeconómico de Banxico y Tipo de Cambio**: Activos de materias primas y exportación exhiben sensibilidad diferenciada a la paridad cambiaria y las tasas de interés de Banxico, actuando como cobertura natural ante depreciaciones cambiarias.",
+            f"4. **Control del Presupuesto de Riesgo (σ_p ≤ {target_risk_val*100:.2f}%)**: Dado que la restricción de volatilidad mensual opera en su nivel óptimo calibrado, si el entorno macroeconómico experimenta un choque de volatilidad (VIX o volatilidad histórica al alza), se requerirá trasladar ponderación hacia activos de menor correlación.",
         ]
         return "\n\n".join(recs)
 
@@ -445,19 +447,21 @@ class QuantitativePortfolioAgent:
             )
 
         elif any(w in q for w in ["riesgo", "7%", "volatilidad", "tope", "sigma", "restricci"]):
+            target_std_val = context.get("target_std", 0.07)
             return (
-                "### 📋 Dictamen Cuantitativo: Análisis del Presupuesto de Riesgo (σ_p ≤ 7.00% Mensual)\n\n"
+                f"### 📋 Dictamen Cuantitativo: Análisis del Presupuesto de Riesgo (σ_p ≤ {target_std_val*100:.2f}% Mensual)\n\n"
                 "#### 1. 📊 Diagnóstico Cuantitativo y Numérico\n"
-                f"La restricción de riesgo mensual impuesta ($\\sigma_p \\le 0.07$) se encuentra **activa y saturada al 100%** ({opt_vol_str}). "
-                f"Esto significa que el algoritmo SLSQP llegó al límite superior de volatilidad tolerada para extraer el mayor rendimiento posible ({opt_ret_str} mensual).\n\n"
-                "#### 2. 📐 Multiplicador de Lagrange y Sensibilidad Marginal (Shadow Price)\n"
-                "El precio sombra del riesgo indica cómo respondería el retorno ante variaciones del límite permitido:\n"
-                "• **Relajar la restricción a $\\sigma_p \\le 8.00\\%$**: Permitiría al portafolio incrementar la ponderación en Peñoles (activo con 1.80% mensual pero 12.86% de volatilidad), elevando el retorno esperado a ~1.78% mensual.\n"
-                "• **Apretar la restricción a $\\sigma_p \\le 5.00\\%$**: Forzaría al optimizador a buscar la Cartera de Mínima Varianza, rotando fuertemente hacia Kimberly Clark, Walmart y Femsa, reduciendo el retorno esperado a ~0.95% mensual.\n\n"
-                "#### 3. 🛡️ Análisis de Presupuesto de Riesgo en BMV\n"
-                "Una volatilidad mensual del 7.00% es equivalente a un perfil moderado-agresivo en acciones mexicanas. Al no estar anualizado, 7.00% mensual implica que en aproximadamente el 68% de los meses, el retorno fluctuará dentro de un rango de $[-5.40\\%, +8.60\\%]$.\n\n"
+                f"La restricción de riesgo mensual impuesta ($\\sigma_p \\le {target_std_val*100:.2f}\\%$) determina el presupuesto de volatilidad disponible. "
+                f"La cartera óptima actual opera con una volatilidad de **{opt_vol_str}** y un rendimiento esperado de **{opt_ret_str} mensual**.\n\n"
+                "#### 2. 📐 Sensibilidad Marginal y Curva de la Frontera Eficiente\n"
+                "El comportamiento del portafolio al ajustar la restricción de riesgo sigue la curvatura estricta de Markowitz:\n"
+                f"• **Al aumentar la cota de riesgo**: El optimizador SLSQP amplía el conjunto de combinaciones factibles, incrementando el peso en los activos con mayor retorno esperado mensual.\n"
+                f"• **Al reducir la cota hacia el riesgo mínimo del mercado ({context.get('min_possible_std', 0.037)*100:.2f}%)**: El modelo converge progresivamente hacia la Cartera de Mínima Varianza Global, maximizando la diversificación para proteger el capital.\n\n"
+                "#### 3. 🛡️ Análisis del Presupuesto de Riesgo\n"
+                f"Una volatilidad mensual del {target_std_val*100:.2f}% opera en escala mensual estricta (sin anualizar). "
+                f"Bajo normalidad estadística, en aproximadamente el 68% de los períodos mensuales el rendimiento se mantendrá en un intervalo estimado de $[\\mu_p - \\sigma_p, \\mu_p + \\sigma_p]$.\n\n"
                 "#### 4. 💼 Recomendación para el Comité de Inversión\n"
-                "El nivel actual de 7.00% es óptimo para inversionistas institucionales que buscan superar holgadamente al IPC (que rindió 0.09% mensual con 4.59% de volatilidad). Si la aversión al riesgo del fondo es mayor, sugerimos un perfil conservador con tope en 5.50% mensual."
+                f"La cota actual de {target_std_val*100:.2f}% mensual representa el punto de equilibrio elegido para este mandato de inversión. Si el Comité busca un perfil más defensivo, puede deslizar la cota hacia el riesgo mínimo del mercado; si busca mayor retorno absoluto, puede elevar la tolerancia al riesgo."
             )
 
         elif any(w in q for w in ["sharpe", "anualiz", "rf", "tasa"]):

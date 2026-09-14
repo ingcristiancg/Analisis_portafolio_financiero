@@ -420,7 +420,7 @@ def generate_word_report(
 
     # 6. Cartera Óptima de Markowitz
     h4 = doc.add_heading(level=1)
-    h4_run = h4.add_run("4. Cartera Óptima de Markowitz (σ_p ≤ 7.0% Mensual)")
+    h4_run = h4.add_run(f"4. Cartera Óptima de Markowitz (σ_p ≤ {opt_data['target_max_std']*100:.2f}% Mensual)")
     h4_run.font.color.rgb = RGBColor(0x1B, 0x36, 0x5D)
 
     p_opt = doc.add_paragraph()
@@ -428,7 +428,7 @@ def generate_word_report(
     p_opt.add_run(f"• Rendimiento Mensual Esperado (μ_p): ").bold = True
     p_opt.add_run(f"{opt_data['expected_return']*100:.3f}%\n")
     p_opt.add_run(f"• Volatilidad Mensual de la Cartera (σ_p): ").bold = True
-    p_opt.add_run(f"{opt_data['volatility']*100:.3f}% (Restricción de ≤ 7.00% satisfecha)\n")
+    p_opt.add_run(f"{opt_data['volatility']*100:.3f}% (Restricción de ≤ {opt_data['target_max_std']*100:.2f}% satisfecha)\n")
     p_opt.add_run(f"• Ratio de Sharpe Mensual (Rf=0): ").bold = True
     p_opt.add_run(f"{opt_data['sharpe_ratio']:.4f}\n")
 

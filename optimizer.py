@@ -765,3 +765,65 @@ def calculate_benchmark_metrics(
         "cumulative_ipc_return": cum_m,
         "aligned_series": aligned,
     }
+
+
+def compute_efficient_frontier(
+    stock_returns: pd.DataFrame,
+    num_points: int = 35,
+    max_weight_per_asset: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Calcula la curva continua de la Frontera Eficiente de Markowitz:
+    - Evalúa un espectro de cotas de volatilidad desde la Cartera de Mínima Varianza Global
+      hasta la cartera de mayor rendimiento esperado alcanzable.
+    - Devuelve vectores de volatilidades, rendimientos y ratios Sharpe para graficar en tiempo real.
+    """
+    mean_returns = np.array(stock_returns.mean().values, dtype=float, copy=True)
+    cov_matrix = np.array(stock_returns.cov().values, dtype=float, copy=True)
+    n = len(mean_returns)
+
+    if len(stock_returns) < n or np.linalg.cond(cov_matrix) > 1e8:
+        cov_matrix = cov_matrix + 1e-6 * np.eye(n)
+
+    min_res = optimize_minimum_variance(stock_returns, max_weight_per_asset=max_weight_per_asset)
+    min_vol = float(min_res["volatility"])
+    min_ret = float(min_res["expected_return"])
+
+    max_ret_idx = int(np.argmax(mean_returns))
+    max_asset_vol = float(np.sqrt(cov_matrix[max_ret_idx, max_ret_idx]))
+    max_ret = float(mean_returns[max_ret_idx])
+
+    upper_vol = max(max_asset_vol, min_vol * 1.05)
+    target_stds = np.linspace(min_vol, upper_vol, num_points)
+
+    frontier_vols = []
+    frontier_rets = []
+    frontier_sharpes = []
+
+    for s in target_stds:
+        opt = optimize_markowitz_max_return(
+            stock_returns,
+            max_std=float(s),
+            adaptive_risk=True,
+            max_weight_per_asset=max_weight_per_asset,
+        )
+        frontier_vols.append(float(opt["volatility"]))
+        frontier_rets.append(float(opt["expected_return"]))
+        frontier_sharpes.append(float(opt["sharpe_ratio"]))
+
+    df_front = pd.DataFrame({
+        "volatility": frontier_vols,
+        "return": frontier_rets,
+        "sharpe": frontier_sharpes,
+    }).drop_duplicates(subset=["volatility"]).sort_values(by="volatility").reset_index(drop=True)
+
+    return {
+        "volatilities": df_front["volatility"].tolist(),
+        "returns": df_front["return"].tolist(),
+        "sharpes": df_front["sharpe"].tolist(),
+        "min_volatility": min_vol,
+        "min_return": min_ret,
+        "max_volatility": upper_vol,
+        "max_return": max_ret,
+    }
+

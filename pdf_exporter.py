@@ -398,10 +398,10 @@ def generate_pdf_report(
     story.append(Spacer(1, 10))
 
     # 6. Cartera Óptima de Markowitz
-    story.append(Paragraph("4. Cartera Óptima de Markowitz (σ_p ≤ 7.00% Mensual)", style_h2))
+    story.append(Paragraph(f"4. Cartera Óptima de Markowitz (σ_p ≤ {opt_data['target_max_std']*100:.2f}% Mensual)", style_h2))
     story.append(Paragraph(
         f"• <b>Rendimiento Esperado Mensual (μ_p):</b> {opt_data['expected_return']*100:.3f}%<br/>"
-        f"• <b>Volatilidad Mensual (σ_p):</b> {opt_data['volatility']*100:.3f}% (Restricción ≤ {opt_data['target_max_std']*100:.1f}% satisfecha)<br/>"
+        f"• <b>Volatilidad Mensual (σ_p):</b> {opt_data['volatility']*100:.3f}% (Restricción ≤ {opt_data['target_max_std']*100:.2f}% satisfecha)<br/>"
         f"• <b>Ratio de Sharpe Mensual:</b> {opt_data['sharpe_ratio']:.4f}",
         style_body
     ))

@@ -526,55 +526,53 @@ if prep_data is not None:
         min_var_check = optimizer.optimize_minimum_variance(prep_data["stock_returns"])
         min_market_risk = float(min_var_check["volatility"])
 
-        slider_min = max(0.005, round(min_market_risk, 4))
-        slider_max = max(0.30, round(min_market_risk * 3.0, 2))
+        # Rango del slider de riesgo: desde el riesgo mínimo (o 0.01) hasta la volatilidad máxima de los activos
+        cov_diag = np.diag(prep_data["stock_returns"].cov().values)
+        max_asset_std = float(np.sqrt(cov_diag).max()) if len(cov_diag) > 0 else 0.25
+        slider_min = max(0.01, round(min_market_risk, 4))
+        slider_max = max(round(max_asset_std * 1.05, 4), round(min_market_risk * 2.5, 4), 0.20)
         default_risk_val = round(max(TARGET_RISK, min_market_risk), 4)
 
-        # Estado reactivo en session_state para permitir aumentar o bajar fluidamente
-        if "user_target_risk" not in st.session_state:
-            st.session_state["user_target_risk"] = default_risk_val
-        elif st.session_state["user_target_risk"] < slider_min:
-            st.session_state["user_target_risk"] = slider_min
-        elif st.session_state["user_target_risk"] > slider_max:
-            st.session_state["user_target_risk"] = slider_max
+        # Clave autoritativa de sesión para el slider y los botones
+        if "target_risk_slider" not in st.session_state:
+            st.session_state["target_risk_slider"] = default_risk_val
+        else:
+            # Asegurar que permanezca dentro de los límites válidos
+            st.session_state["target_risk_slider"] = max(slider_min, min(slider_max, float(st.session_state["target_risk_slider"])))
 
-        if "user_max_weight" not in st.session_state:
-            st.session_state["user_max_weight"] = 1.0
+        chosen_target_risk = float(st.session_state["target_risk_slider"])
 
-        chosen_target_risk = float(st.session_state["user_target_risk"])
-        chosen_max_weight = float(st.session_state["user_max_weight"])
-        min_w_allowed = round(1.0 / max(len(prep_data["stock_cols"]), 1), 2)
+        # Función callback para actualizar la cota de riesgo desde los botones
+        def set_target_risk(val):
+            st.session_state["target_risk_slider"] = max(slider_min, min(slider_max, round(float(val), 4)))
 
-        # Control interactivo de riesgo en barra lateral
+        # Barra lateral informativa (sin sliders duplicados para evitar colisiones de estado)
         with st.sidebar:
             st.markdown("---")
-            st.markdown("#### 🎯 Calibración de Restricciones")
-            sidebar_risk = st.slider(
-                "Tope de Volatilidad Mensual (σ_p):",
-                min_value=slider_min,
-                max_value=slider_max,
-                value=chosen_target_risk,
-                step=0.0025,
-                format="%.2f%%",
-                key="sidebar_risk_slider",
-                help="Cota superior de volatilidad mensual. El límite inferior está delimitado por el riesgo mínimo alcanzable."
-            )
-            if abs(sidebar_risk - chosen_target_risk) > 1e-4:
-                st.session_state["user_target_risk"] = sidebar_risk
-                st.rerun()
+            st.markdown("#### 🎯 Restricción Activa")
+            st.markdown(f"""
+            <div style="background: #f1f5f9; border-radius: 8px; padding: 12px 14px; border-left: 4px solid #0284c7; margin-bottom: 10px;">
+                <div style="font-size: 0.75rem; color: #64748b; font-weight: 600; text-transform: uppercase;">Cota Máx. de Riesgo</div>
+                <div style="font-size: 1.45rem; font-weight: 700; color: #0f172a; line-height: 1.2;">σ_p ≤ {chosen_target_risk*100:.2f}%</div>
+                <div style="font-size: 0.78rem; color: #0369a1; margin-top: 3px;">Frecuencia mensual estricta</div>
+            </div>
+            """, unsafe_allow_html=True)
 
             if min_market_risk > TARGET_RISK:
                 st.info(f"💡 Riesgo mínimo intrínseco del mercado: **{min_market_risk:.2%}** mensual.")
             else:
-                st.caption(f"✓ Riesgo mínimo del mercado: **{min_market_risk:.2%}** mensual.")
+                st.caption(f"✓ Riesgo mínimo alcanzable: **{min_market_risk:.2%}** mensual.")
 
-        # 3. Optimización Markowitz con Autonomía Adaptativa y límites por activo
+        # 3. Optimización Markowitz centrada exclusivamente en riesgo (long-only pura sum(w)=1, w>=0)
         opt_data = optimizer.optimize_markowitz_max_return(
             prep_data["stock_returns"],
             max_std=chosen_target_risk,
             adaptive_risk=True,
-            max_weight_per_asset=chosen_max_weight,
+            max_weight_per_asset=1.0,
         )
+
+        # Cálculo de la Frontera Eficiente continua de Markowitz
+        efficient_frontier = optimizer.compute_efficient_frontier(prep_data["stock_returns"])
 
         # 4. Monte Carlo normativo (1,000 carteras aleatorias)
         mc_data = optimizer.run_monte_carlo_simulation(prep_data["stock_returns"], num_portfolios=NUM_MONTE_CARLO)
@@ -586,7 +584,7 @@ if prep_data is not None:
         quant_agent = agent.QuantitativePortfolioAgent(api_key=api_key_input)
         agent_report = quant_agent.generate_autonomous_report(prep_data, stats_data, opt_data, mc_data, bench_data)
 
-        # Confirmación serena y confiable
+        # Confirmación de carga
         st.success(f"✅ **Base de Datos Validada**: {data_source_name} | {prep_data['num_periods']} meses cronológicos ({prep_data['start_date'].strftime('%b %Y')} a {prep_data['end_date'].strftime('%b %Y')}).")
 
         # ==========================================
@@ -599,127 +597,136 @@ if prep_data is not None:
                     <span style="font-size: 2.2rem; line-height: 1;">🤝</span>
                     <div>
                         <h4 style="margin: 0 0 6px 0; color: #065f46; font-size: 1.15rem; font-weight: 700;">
-                            ¡Hola! Calibramos tu portafolio de manera amable, segura y sin errores
+                            Calibración adaptativa en Mínima Varianza Global
                         </h4>
                         <p style="margin: 0 0 8px 0; color: #1e293b; font-size: 0.95rem; line-height: 1.55;">
-                            Revisamos con cuidado los activos de tu archivo y encontramos que la combinación más segura y defensiva que permite 
-                            este mercado tiene una volatilidad de <b>{opt_data['min_possible_std']*100:.2f}% mensual</b> (Cartera de Mínima Varianza Global).
+                            La cota de riesgo solicitada (<b>{chosen_target_risk*100:.2f}%</b>) es inferior al menor riesgo alcanzable 
+                            físicamente en este mercado (<b>{opt_data['min_possible_std']*100:.2f}% mensual</b>). 
+                            El modelo calibró el portafolio en la Cartera de Mínima Varianza Global para garantizar una solución matemáticamente óptima.
                         </p>
-                        <p style="margin: 0 0 10px 0; color: #334155; font-size: 0.92rem; line-height: 1.55;">
-                            Para cuidar tu experiencia y asegurarte siempre una respuesta financiera matemáticamente válida y óptima, 
-                            adaptamos con serenidad la meta inicial (7.00%) a este nivel óptimo de <b>{opt_data['volatility']*100:.2f}%</b>.
-                        </p>
-                        <div style="background: rgba(16, 185, 129, 0.12); border-left: 3px solid #10b981; border-radius: 6px; padding: 8px 12px; font-size: 0.88rem; color: #047857;">
-                            💡 <b>Tú tienes el control total:</b> En el nuevo <b>Módulo de Administración de Restricciones</b> a continuación puedes 
-                            <b>aumentar o bajar</b> el riesgo libremente y regular la concentración de capital a tu gusto.
-                        </div>
                     </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
         # ==========================================
-        # MÓDULO INTERACTIVO DE ADMINISTRACIÓN DE RESTRICCIONES (AUMENTAR O BAJAR)
+        # GESTOR DE RESTRICCIONES CUANTITATIVAS: GESTIÓN EXCLUSIVA DE RIESGO
         # ==========================================
         with st.container():
+            if opt_data["is_constraint_active"]:
+                badge_bg = "#dcfce7"
+                badge_color = "#166534"
+                badge_text = f"🟢 Restricción Activa: {opt_data['volatility']*100:.2f}%"
+            elif opt_data.get("adapted_risk"):
+                badge_bg = "#fef3c7"
+                badge_color = "#92400e"
+                badge_text = f"🛡️ Mínima Varianza: {opt_data['volatility']*100:.2f}%"
+            else:
+                badge_bg = "#e0f2fe"
+                badge_color = "#0369a1"
+                badge_text = f"🔵 Cota Holgada: {opt_data['volatility']*100:.2f}%"
+
             st.markdown(f"""
             <div class="restriction-admin-card notranslate">
-                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; margin-bottom: 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h3 style="margin: 0; color: #0f172a; font-size: 1.18rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
-                            <span>🎛️</span> Centro de Administración de Restricciones Cuantitativas
+                        <h3 style="margin: 0; color: #0f172a; font-size: 1.22rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                            <span>🎛️</span> Gestor de Restricciones Cuantitativas: Control Exclusivo de Riesgo (σ_p)
                         </h3>
-                        <p style="margin: 3px 0 0 0; color: #64748b; font-size: 0.88rem;">
-                            Aquí puedes <b>aumentar o bajar</b> las restricciones del modelo. El portafolio, las ponderaciones y los reportes se actualizan automáticamente en tiempo real.
+                        <p style="margin: 4px 0 0 0; color: #64748b; font-size: 0.90rem;">
+                            Regula la cota máxima de volatilidad mensual permitida. Todos los gráficos, la frontera eficiente y las métricas se actualizan instantáneamente en tiempo real.
                         </p>
                     </div>
-                    <div>
-                        <span style="background: #e0f2fe; color: #0369a1; padding: 5px 12px; border-radius: 20px; font-size: 0.82rem; font-weight: 600;">
-                            🛡️ Riesgo Mínimo del Mercado: {min_market_risk*100:.2f}%
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <span style="background: #e0f2fe; color: #0369a1; padding: 6px 14px; border-radius: 20px; font-size: 0.84rem; font-weight: 600;">
+                            🛡️ Riesgo Mín. Mercado: {min_market_risk*100:.2f}%
+                        </span>
+                        <span style="background: {badge_bg}; color: {badge_color}; padding: 6px 14px; border-radius: 20px; font-size: 0.84rem; font-weight: 600;">
+                            {badge_text}
                         </span>
                     </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            mod_col1, mod_col2 = st.columns([1.25, 1.0])
-
-            with mod_col1:
-                st.markdown(f"##### 🎯 Restricción de Riesgo Mensual (Cota Actual: **{chosen_target_risk*100:.2f}%**)")
-                
-                # Botones de ajuste rápido para aumentar o bajar
-                b1, b2, b3, b4 = st.columns(4)
-                with b1:
-                    if st.button("➖ Bajar (-0.5%)", key="btn_dec_risk", use_container_width=True, help="Disminuye la restricción de riesgo en 0.50% mensual"):
-                        st.session_state["user_target_risk"] = max(slider_min, round(chosen_target_risk - 0.005, 4))
-                        st.rerun()
-                with b2:
-                    if st.button("➕ Subir (+0.5%)", key="btn_inc_risk", use_container_width=True, help="Aumenta la restricción de riesgo en 0.50% mensual"):
-                        st.session_state["user_target_risk"] = min(slider_max, round(chosen_target_risk + 0.005, 4))
-                        st.rerun()
-                with b3:
-                    if st.button(f"🛡️ Mínimo ({min_market_risk*100:.1f}%)", key="btn_min_risk", use_container_width=True, help="Fija la cota al menor riesgo físicamente posible"):
-                        st.session_state["user_target_risk"] = slider_min
-                        st.rerun()
-                with b4:
-                    growth_target = min(slider_max, round(min_market_risk + 0.03, 4))
-                    if st.button(f"🚀 Retorno ({growth_target*100:.1f}%)", key="btn_growth_risk", use_container_width=True, help="Permite mayor tolerancia de riesgo para buscar retornos más altos"):
-                        st.session_state["user_target_risk"] = growth_target
-                        st.rerun()
-
-                # Deslizador continuo
-                slider_val = st.slider(
-                    "Desliza para calibrar con precisión el tope de riesgo (σ_p):",
-                    min_value=slider_min,
-                    max_value=slider_max,
-                    value=chosen_target_risk,
-                    step=0.0025,
-                    format="%.2f%%",
-                    key="main_slider_risk",
-                    help="Desplaza hacia la derecha para aumentar la tolerancia al riesgo o a la izquierda para bajarla hacia la cota mínima."
+            # Botones de ajuste rápido
+            b_cols = st.columns([1.25, 1.1, 1.1, 1.2, 1.25])
+            with b_cols[0]:
+                st.button(
+                    f"🛡️ Mínima Varianza ({min_market_risk*100:.2f}%)",
+                    key="btn_min_risk",
+                    use_container_width=True,
+                    on_click=set_target_risk,
+                    args=(min_market_risk,),
+                    help="Fija la cota al menor riesgo matemáticamente posible en este mercado",
                 )
-                if abs(slider_val - chosen_target_risk) > 1e-4:
-                    st.session_state["user_target_risk"] = slider_val
-                    st.rerun()
-
-            with mod_col2:
-                st.markdown(f"##### 🧱 Concentración Máxima por Acción (Tope: **{chosen_max_weight*100:.0f}%**)")
-                
-                wb1, wb2, wb3 = st.columns(3)
-                with wb1:
-                    if st.button("Libre (100%)", key="btn_w_100", use_container_width=True, help="Sin restricción de concentración individual"):
-                        st.session_state["user_max_weight"] = 1.0
-                        st.rerun()
-                with wb2:
-                    if st.button("Moderado (40%)", key="btn_w_40", use_container_width=True, help="Ninguna acción supera el 40%"):
-                        st.session_state["user_max_weight"] = 0.40
-                        st.rerun()
-                with wb3:
-                    if st.button("Diversificado (25%)", key="btn_w_25", use_container_width=True, help="Ninguna acción supera el 25%"):
-                        st.session_state["user_max_weight"] = 0.25
-                        st.rerun()
-
-                slider_w_val = st.slider(
-                    "Desliza para acotar la ponderación máxima por activo (w_i):",
-                    min_value=min_w_allowed,
-                    max_value=1.0,
-                    value=chosen_max_weight,
-                    step=0.05,
-                    format="%.0f%%",
-                    key="main_slider_weight",
-                    help="Controla el porcentaje máximo de capital asignado a un solo activo para forzar mayor diversificación."
+            with b_cols[1]:
+                st.button(
+                    "➖ Bajar (-0.50%)",
+                    key="btn_dec_risk",
+                    use_container_width=True,
+                    on_click=set_target_risk,
+                    args=(chosen_target_risk - 0.005,),
+                    help="Disminuye la restricción de riesgo en 0.50% mensual",
                 )
-                if abs(slider_w_val - chosen_max_weight) > 1e-4:
-                    st.session_state["user_max_weight"] = slider_w_val
-                    st.rerun()
+            with b_cols[2]:
+                st.button(
+                    "➕ Subir (+0.50%)",
+                    key="btn_inc_risk",
+                    use_container_width=True,
+                    on_click=set_target_risk,
+                    args=(chosen_target_risk + 0.005,),
+                    help="Aumenta la restricción de riesgo en 0.50% mensual",
+                )
+            with b_cols[3]:
+                norm_val = 0.07 if slider_min <= 0.07 <= slider_max else slider_min
+                st.button(
+                    f"⚖️ Norma Base ({norm_val*100:.1f}%)",
+                    key="btn_norm_risk",
+                    use_container_width=True,
+                    on_click=set_target_risk,
+                    args=(norm_val,),
+                    help="Restaura la restricción normativa de la especificación académica (7.00% mensual)",
+                )
+            with b_cols[4]:
+                high_target = min(slider_max, round(min_market_risk * 2.2, 4))
+                st.button(
+                    f"🚀 Alto Retorno ({high_target*100:.1f}%)",
+                    key="btn_growth_risk",
+                    use_container_width=True,
+                    on_click=set_target_risk,
+                    args=(high_target,),
+                    help="Permite mayor tolerancia de riesgo para buscar el máximo rendimiento disponible",
+                )
 
-            st.markdown("""
-            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; margin-top: 10px; font-size: 0.85rem; color: #475569;">
-                💡 <b>Dinámica Cuantitativa</b>: Al <b>aumentar</b> la cota de riesgo, permites que el modelo busque acciones de mayor rendimiento esperado. 
-                Al <b>bajarla</b> hacia el riesgo mínimo, el portafolio prioriza la estabilidad defensiva. 
-                Si <b>acotas</b> el peso por activo (ej. ≤ 35%), evitas concentrar el capital en pocas emisoras.
+            # Deslizador continuo
+            st.slider(
+                "Desliza para calibrar con precisión el tope de riesgo mensual (σ_p):",
+                min_value=slider_min,
+                max_value=slider_max,
+                step=0.0025,
+                format="%.2f%%",
+                key="target_risk_slider",
+                help="Desplaza hacia la derecha para incrementar la tolerancia al riesgo o a la izquierda para reducirla hacia la mínima varianza.",
+            )
+
+            # Resumen dinámico del estado del portafolio dentro del gestor
+            top_asset_preview = opt_data["weights_df"].iloc[0]["Activo"]
+            top_w_preview = opt_data["weights_df"].iloc[0]["Porcentaje (%)"]
+            
+            st.markdown(f"""
+            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-top: 6px; font-size: 0.88rem; color: #334155; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                <div>
+                    <b>Efecto Cuantitativo:</b> Cota fijada en <b>{chosen_target_risk*100:.2f}%</b> &rarr; 
+                    Volatilidad lograda: <b>{opt_data['volatility']*100:.2f}%</b> | Rendimiento esperado: <b>{opt_data['expected_return']*100:.2f}% mensual</b> | 
+                    Sharpe (Rf=0): <b>{opt_data['sharpe_ratio']:.4f}</b>
+                </div>
+                <div style="color: #0369a1; font-weight: 600;">
+                    Activo Principal: {top_asset_preview} ({top_w_preview:.1f}%)
+                </div>
             </div>
             """, unsafe_allow_html=True)
+
 
         # ==========================================
         # FILA DE KPIs INSTITUCIONALES
@@ -800,8 +807,9 @@ if prep_data is not None:
                 <div class="metric-card" style="text-align: center;">
                     <div class="metric-label">⚖️ Modelo Cuantitativo</div>
                     <div style="font-size: 1.05rem; font-weight: 700; color: #0f172a; margin-top: 4px;">Markowitz Long-Only</div>
-                    <div class="metric-sub">Restricción: σ_p ≤ {TARGET_RISK*100:.1f}% Mensual</div>
+                    <div class="metric-sub">Restricción Activa: σ_p ≤ {opt_data['target_max_std']*100:.2f}% Mensual</div>
                 </div>
+
                 """, unsafe_allow_html=True)
             with c3:
                 st.markdown(f"""
@@ -843,13 +851,23 @@ if prep_data is not None:
                     hovertemplate="Volatilidad: %{x:.2f}%<br>Retorno: %{y:.2f}%<extra></extra>",
                 ))
 
+                # Curva continua de la Frontera Eficiente de Markowitz
+                fig_mc.add_trace(go.Scatter(
+                    x=[v * 100 for v in efficient_frontier["volatilities"]],
+                    y=[r * 100 for r in efficient_frontier["returns"]],
+                    mode="lines",
+                    line=dict(color="#0284C7", width=3.5),
+                    name="Frontera Eficiente Markowitz",
+                    hovertemplate="<b>FRONTERA EFICIENTE</b><br>Volatilidad: %{x:.2f}%<br>Retorno: %{y:.2f}%<extra></extra>",
+                ))
+
                 # Cartera Óptima destacada con tono institucional Dorado / Azul Marino
                 fig_mc.add_trace(go.Scatter(
                     x=[opt_data["volatility"] * 100],
                     y=[opt_data["expected_return"] * 100],
                     mode="markers",
                     marker=dict(
-                        size=17,
+                        size=18,
                         color="#D97706",
                         symbol="star",
                         line=dict(color="#1E293B", width=1.5),
@@ -874,19 +892,30 @@ if prep_data is not None:
                         hovertemplate="<b>BENCHMARK</b><br>Volatilidad: %{x:.2f}%<br>Retorno: %{y:.2f}%<extra></extra>",
                     ))
 
-                # Línea de restricción en gris institucional
+                # Región factible acotada por el presupuesto de riesgo
+                fig_mc.add_vrect(
+                    x0=0,
+                    x1=opt_data["target_max_std"] * 100,
+                    fillcolor="#0284c7",
+                    opacity=0.05,
+                    layer="below",
+                    line_width=0,
+                )
+
+                # Línea de restricción en rojo institucional dinámico
                 fig_mc.add_vline(
                     x=opt_data["target_max_std"] * 100,
                     line_dash="dash",
-                    line_color="#475569",
-                    annotation_text=f"Límite σ_p ≤ {opt_data['target_max_std']*100:.1f}%",
+                    line_color="#DC2626",
+                    line_width=2.2,
+                    annotation_text=f"Cota Riesgo: σ_p ≤ {opt_data['target_max_std']*100:.2f}%",
                     annotation_position="top left",
                 )
 
                 fig_mc.update_layout(
                     xaxis_title="Volatilidad Mensual σ_p (%) [PROHIBIDO ANUALIZAR]",
                     yaxis_title="Rendimiento Esperado Mensual μ_p (%)",
-                    height=500,
+                    height=510,
                     margin=dict(l=20, r=20, t=30, b=20),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                     template="plotly_white",
@@ -894,26 +923,51 @@ if prep_data is not None:
                 st.plotly_chart(fig_mc, width="stretch")
 
             with col_right:
-                st.markdown("#### 🥧 Asignación Óptima de Capital (Pesos w_i)")
+                st.markdown("#### ⚖️ Asignación Óptima de Capital (Pesos w_i)")
                 w_df = opt_data["weights_df"]
                 w_active = w_df[w_df["Ponderación Óptima (w)"] > 0.001]
 
-                fig_pie = px.pie(
-                    w_active,
-                    values="Porcentaje (%)",
-                    names="Activo",
-                    hole=0.45,
-                    color_discrete_sequence=px.colors.sequential.Blues_r,
-                )
-                fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-                fig_pie.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
-                st.plotly_chart(fig_pie, width="stretch")
+                tab_chart1, tab_chart2 = st.tabs(["🥧 Gráfico Circular", "📊 Gráfico de Barras"])
+                with tab_chart1:
+                    fig_pie = px.pie(
+                        w_active,
+                        values="Porcentaje (%)",
+                        names="Activo",
+                        hole=0.45,
+                        color_discrete_sequence=px.colors.sequential.Blues_r,
+                    )
+                    fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+                    fig_pie.update_layout(height=270, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+                    st.plotly_chart(fig_pie, width="stretch")
+
+                with tab_chart2:
+                    fig_bar = px.bar(
+                        w_active,
+                        x="Porcentaje (%)",
+                        y="Activo",
+                        orientation="h",
+                        text="Porcentaje (%)",
+                        color="Porcentaje (%)",
+                        color_continuous_scale="Blues",
+                    )
+                    fig_bar.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                    fig_bar.update_layout(
+                        height=270,
+                        margin=dict(l=10, r=35, t=10, b=10),
+                        xaxis_title="Ponderación (%)",
+                        yaxis_title="",
+                        showlegend=False,
+                        coloraxis_showscale=False,
+                        template="plotly_white",
+                    )
+                    st.plotly_chart(fig_bar, width="stretch")
 
                 st.markdown("##### Ponderaciones Detalladas")
                 styled_w = w_df.copy()
                 styled_w["Ponderación (w)"] = styled_w["Ponderación Óptima (w)"].apply(lambda x: f"{x:.4f}")
                 styled_w["Asignación"] = styled_w["Porcentaje (%)"].apply(lambda x: f"{x:.2f}%")
                 st.dataframe(styled_w[["Activo", "Ponderación (w)", "Asignación"]], width="stretch", hide_index=True)
+
 
         # ----------------------------------------------------
         # TAB 2: AGENTE CUANTITATIVO AUTÓNOMO
